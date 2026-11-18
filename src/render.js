@@ -3,6 +3,7 @@ import { getWeapon } from './simulation.js';
 
 const UP = new THREE.Vector3(0, 1, 0);
 const TAU = Math.PI * 2;
+const TRAIL_SEGMENTS = 24;
 const clamp = THREE.MathUtils.clamp;
 const mixes = THREE.MathUtils.lerp;
 
@@ -545,7 +546,13 @@ function makeActorRig(geometries, region, team, arena, shadowMaterial) {
     new THREE.BufferGeometry(),
     new THREE.MeshBasicMaterial({ color: '#f2d79e', transparent: true, side: THREE.DoubleSide, opacity: 0, depthWrite: false }),
   );
-  trails.geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(24 * 18), 3).setUsage(THREE.DynamicDrawUsage));
+  trails.geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array((TRAIL_SEGMENTS + 1) * 6), 3).setUsage(THREE.DynamicDrawUsage));
+  const trailIndices = [];
+  for (let strip = 0; strip < TRAIL_SEGMENTS; strip += 1) {
+    const first = strip * 2;
+    trailIndices.push(first, first + 1, first + 2, first + 2, first + 1, first + 3);
+  }
+  trails.geometry.setIndex(trailIndices);
   trails.frustumCulled = false;
   root.add(trails);
 
@@ -570,13 +577,42 @@ function makeWeapon(parent, geometries, weapon) {
     return;
   }
 
-  const length = weapon.id === 'steel-longsword' ? 1.64 : weapon.id === 'plasma-blade' ? 1.37 : 1.05;
+  const length = swordLength(weapon);
   const width = weapon.id === 'bronze-sword' ? 0.17 : 0.13;
   meshPart(parent, box, guard, 0, 0.21, 0, width * 2.44, 0.087, 0.114);
   meshPart(parent, box, steel, 0, 0.245 + length * 0.45, 0, width, length * 0.9, 0.051);
   meshPart(parent, box, edge, 0.011, 0.246 + length * 0.451, 0.029, width * 0.18, length * 0.895, 0.019);
   meshPart(parent, geometries.tapered, steel, 0, 0.24 + length * 0.94, 0, width * 1.45, length * 0.21, 0.077, 0);
 }
+
+function swordLength(weapon) {
+  if (weapon.id === 'steel-longsword') return 1.64;
+  return weapon.id === 'plasma-blade' ? 1.37 : 1.05;
+}
+
+function sampleSwing(progress, direction, wrist, blade) {
+  const angle = (progress - 0.5) * Math.PI;
+  const travel = Math.sin(angle);
+  const forward = Math.cos(angle);
+  wrist.set(
+    0.29 + direction.x * 0.59 * travel,
+    1.38 + direction.y * 0.48 * travel + forward * 0.08,
+    0.17 + forward * 0.61,
+  );
+  blade.set(
+    direction.x * 0.9 * travel + (1 - Math.abs(direction.x)) * 0.14,
+    direction.y * 0.52 * travel + 0.14,
+    0.78 + forward * 0.4,
+  );
+}
+
+const gesture = new THREE.Vector2();
+const swingWrist = new THREE.Vector3();
+const swingBlade = new THREE.Vector3();
+const trailWrist = new THREE.Vector3();
+const trailBlade = new THREE.Vector3();
+const trailTip = new THREE.Vector3();
+const trailRotation = new THREE.Quaternion();
 
 const joint = new THREE.Vector3();
 const shoulderPoint = new THREE.Vector3();
@@ -625,25 +661,22 @@ function poseActor(rig, actor, world, weapon, dt, firstPerson) {
   const swingProgress = clamp((phase - impactStart) / (impactEnd - impactStart), 0, 1);
   const preparation = clamp(phase / impactStart, 0, 1);
   const settle = clamp((phase - impactEnd) / (1 - impactEnd), 0, 1);
-  const swingX = actor.swingX || 0;
-  const swingY = actor.swingY || 0;
   const aimX = actor.aimX || 0;
   const aimY = actor.aimY || 0;
-  const direction = swingX > 0.03 ? -1 : 1;
-  const vertical = Math.abs(swingY) > Math.abs(swingX) * 1.2;
+  gesture.set(actor.swingX || 0, actor.swingY || 0);
+  if (gesture.lengthSq() < 0.0001) gesture.set(0, -1);
+  else gesture.normalize();
   let handX = 0.48 + aimX * 0.22;
   let handY = 1.25 + aimY * 0.36;
   let handZ = 0.36 + stride * 0.055;
   bladeDirection.set(aimX * 0.56 + 0.17, 0.85 + aimY * 0.55, 0.48);
   if (active) {
-    const weight = 1 - settle;
-    const arc = swingProgress * Math.PI;
-    const sweep = Math.cos(arc) * direction;
-    const forward = Math.sin(arc);
-    handX = mixes(handX, vertical ? 0.37 + swingX * 0.19 : sweep * -0.58 + 0.06, preparation * weight);
-    handY = mixes(handY, vertical ? (swingY < 0 ? 1.29 + forward * 0.66 : 1.81 - swingProgress * 0.63) : 1.28 + swingY * 0.35, preparation * weight);
-    handZ = mixes(handZ, 0.13 + forward * 0.62, preparation * weight);
-    bladeDirection.lerp(bladeDirectionScratch.set(vertical ? 0.12 - swingX * 0.46 : sweep * -0.98, vertical ? (swingY < 0 ? -0.48 + swingProgress * 1.24 : 0.93 - swingProgress * 1.54) : 0.13 + swingY * 0.37, (vertical ? 0.33 : 0.17) + forward * 0.84), preparation * weight);
+    const weight = preparation * (1 - settle);
+    sampleSwing(swingProgress, gesture, swingWrist, swingBlade);
+    handX = mixes(handX, swingWrist.x, weight);
+    handY = mixes(handY, swingWrist.y, weight);
+    handZ = mixes(handZ, swingWrist.z, weight);
+    bladeDirection.lerp(swingBlade, weight);
   } else if (actor.guarding) {
     handX = 0.14 + aimX * 0.16;
     handY = 1.52 + aimY * 0.18;
@@ -681,39 +714,37 @@ function poseActor(rig, actor, world, weapon, dt, firstPerson) {
   const ratio = clamp(actor.health / actor.maxHealth, 0, 1);
   rig.healthFg.scale.x = ratio * 0.66;
   rig.healthFg.position.x = (ratio - 1) * 0.33;
-  drawTrail(rig, weapon, active, swingProgress, direction, vertical, swingY);
+  drawTrail(rig, weapon, active, swingProgress, gesture, bob);
 }
 
-const bladeDirectionScratch = new THREE.Vector3();
-
-function drawTrail(rig, weapon, active, swingProgress, direction, vertical, swingY) {
-  const visible = active && swingProgress > 0 && swingProgress < 1;
+function drawTrail(rig, weapon, active, progress, direction, bob) {
+  const visible = active && progress > 0 && progress < 1;
   rig.trails.visible = visible;
   if (!visible) return;
-  const attribute = rig.trails.geometry.getAttribute('position');
-  const indices = [0, 1, 2, 2, 1, 3];
-  const end = swingProgress;
-  const start = Math.max(0, end - 0.29);
-  const impact = (1 - Math.abs(0.51 - swingProgress) * 1.72);
-  rig.trails.material.opacity = impact * 0.48;
+
+  const positions = rig.trails.geometry.getAttribute('position');
+  const start = Math.max(0, progress - 0.29);
+  const axe = weapon.id === 'iron-axe';
+  const tipLength = axe ? 1.43 : 0.24 + swordLength(weapon) * 1.045;
+  const tipSide = axe ? 0.515 : 0;
+
+  rig.trails.material.opacity = (1 - Math.abs(0.51 - progress) * 1.72) * 0.48;
   rig.trails.material.color.set(weapon.color);
-  for (let index = 0; index < 24; index += 1) {
-    const a = mixes(start, end, index / 24);
-    const b = mixes(start, end, (index + 1) / 24);
-    for (let corner = 0; corner < 6; corner += 1) {
-      const key = indices[corner];
-      const fraction = (key >> 1) ? b : a;
-      const amount = key % 2;
-      const theta = (fraction - 0.5) * 2.9;
-      const radius = (weapon.reach - 0.42) * (0.97 - amount * 0.067);
-      if (vertical) {
-        attribute.setXYZ(index * 6 + corner, -0.18 - amount * 0.082, 1.23 - Math.sin(theta) * radius * Math.sign(swingY || 1) * 0.64, Math.cos(theta) * radius);
-      } else {
-        attribute.setXYZ(index * 6 + corner, -Math.sin(theta) * radius * direction, 1.12 + swingY * 0.52 + amount * 0.11, Math.cos(theta) * radius);
-      }
+  for (let strip = 0; strip <= TRAIL_SEGMENTS; strip += 1) {
+    const amount = mixes(start, progress, strip / TRAIL_SEGMENTS);
+    sampleSwing(amount, direction, trailWrist, trailBlade);
+    trailBlade.x *= -1;
+    trailRotation.setFromUnitVectors(UP, trailBlade.normalize());
+    for (let edge = 0; edge < 2; edge += 1) {
+      trailTip.set(tipSide, tipLength - edge * 0.17, 0).applyQuaternion(trailRotation);
+      positions.setXYZ(strip * 2 + edge,
+        -trailWrist.x + trailTip.x,
+        trailWrist.y + trailTip.y + bob,
+        trailWrist.z + trailTip.z,
+      );
     }
   }
-  attribute.needsUpdate = true;
+  positions.needsUpdate = true;
 }
 
 function makeCoreRig(core, region, geometries) {
@@ -946,18 +977,19 @@ export function createRenderer(canvas) {
     const pitch = clamp(view.pitch ?? -0.18, -0.93, 0.67);
     const directionX = Math.sin(yaw);
     const directionZ = Math.cos(yaw);
-    const aimX = actor.aimX || 0;
+    const swingX = actor.swingX || 0;
+    const swingY = actor.swingY || 0;
     const firstPerson = Boolean(view.firstPerson);
     const power = actor.swing < 0 ? 0 : Math.sin(actor.swing * Math.PI) ** 2 * weapon.weight;
     const jitter = Math.sin(time * 10.6) * 0.014 * Math.min(1, (actor.speed || 0) / 7);
     if (firstPerson) {
       cameraDesired.set(x + directionX * 0.11, y + 1.985 + jitter, z + directionZ * 0.11);
-      const rise = Math.sin(pitch + (actor.swingY || 0) * power * 0.016);
-      cameraTarget.set(x + (directionX * 8 - directionZ * power * 0.086 * aimX) * Math.cos(pitch), y + 1.985 + rise * 8 + jitter, z + (directionZ * 8 + directionX * power * 0.086 * aimX) * Math.cos(pitch));
+      const rise = Math.sin(pitch + swingY * power * 0.016);
+      cameraTarget.set(x + (directionX * 8 - directionZ * power * 0.086 * swingX) * Math.cos(pitch), y + 1.985 + rise * 8 + jitter, z + (directionZ * 8 + directionX * power * 0.086 * swingX) * Math.cos(pitch));
     } else {
       const distance = world.mode === 'arena' ? 6.55 : 7.55;
       const horizontal = distance * Math.cos(pitch);
-      const shoulder = 0.72 + power * aimX * 0.061;
+      const shoulder = 0.72 + power * swingX * 0.061;
       cameraDesired.set(x - directionX * horizontal - directionZ * shoulder, y + 2.48 - Math.sin(pitch) * distance + jitter * 0.5, z - directionZ * horizontal + directionX * shoulder);
       cameraBase.set(x, y + 2.22, z);
       for (let step = 3; step <= 15; step += 1) {
@@ -974,7 +1006,7 @@ export function createRenderer(canvas) {
       const ahead = world.mode === 'arena' ? 3.1 : 4.5;
       cameraTarget.set(
         x + directionX * ahead - directionZ * 0.39,
-        y + 1.31 + Math.sin(pitch) * 2.36 - (actor.swingY || 0) * power * 0.069,
+        y + 1.31 + Math.sin(pitch) * 2.36 + swingY * power * 0.069,
         z + directionZ * ahead + directionX * 0.39,
       );
     }
@@ -988,7 +1020,7 @@ export function createRenderer(canvas) {
       look.lerp(cameraTarget, 1 - Math.exp(-26 * dt));
     }
     camera.lookAt(look);
-    camera.rotateZ(power * (actor.swingX || 0) * (firstPerson ? 0.017 : 0.011));
+    camera.rotateZ(power * swingX * (firstPerson ? 0.017 : 0.011));
     lastFirstPerson = firstPerson;
   }
 

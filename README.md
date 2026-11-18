@@ -21,8 +21,8 @@ Open the address Vite prints. Run `npm run build` to produce a static site in `d
 | Input | Action |
 | --- | --- |
 | WASD | Move |
-| Mouse | Look and direct your weapon arm |
-| Left click | Swing in the direction you aim |
+| Gentle mouse movement | Look and position your weapon |
+| Quick mouse flick | Swing in the direction of motion |
 | Right click | Hold to guard |
 | Shift | Sprint |
 | E | Pick up nearby gear |
@@ -30,7 +30,7 @@ Open the address Vite prints. Run `npm run build` to produce a static site in `d
 | V | Switch between third and first person in Frontier |
 | Escape | Open the game menu |
 
-Third person is the default. Heavier weapons respond more slowly and pull the camera farther during attacks.
+Flick down for a downward swing. Heavier weapons respond more slowly and pull the camera farther during attacks. Third person is the default.
 
 ## Online Arenas
 

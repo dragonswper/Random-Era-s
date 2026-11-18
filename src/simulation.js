@@ -242,8 +242,8 @@ function getAiInput(game, actor) {
   }
 
   return {
-    moveX, moveZ, facing, attack, guard, aimX: guard ? -player.swingX : actor.approachSide * 0.8,
-    aimY: guard ? player.swingY : Math.sin(game.time * 1.8) * 0.45,
+    moveX, moveZ, facing, attack, guard, aimX: guard ? player.swingX : actor.approachSide * 0.8,
+    aimY: guard ? -player.swingY : Math.sin(game.time * 1.8) * 0.45,
   };
 }
 
@@ -284,7 +284,7 @@ function moveActor(game, actor, input, dt, sprint) {
 function inStrike(game, actor, target, radius, weapon, endClearance = 0) {
   const range = distance(actor, target);
   if (range > weapon.reach + radius) return false;
-  const strikeAngle = actor.facing + actor.swingX * 0.26;
+  const strikeAngle = actor.facing - actor.swingX * 0.26;
   const angle = heading(actor, target) - strikeAngle;
   return (range < 0.95 || Math.cos(angle) > 0.35) && lineClear(game.world, actor, target, endClearance);
 }
@@ -292,7 +292,7 @@ function inStrike(game, actor, target, radius, weapon, endClearance = 0) {
 function damageActor(game, attacker, target, weapon) {
   const facingAttack = Math.cos(heading(target, attacker) - target.facing) > 0.25;
   const blocked = target.guarding && facingAttack && target.stamina >= 10;
-  const directional = Math.hypot(target.aimX + attacker.swingX, target.aimY - attacker.swingY) < 0.88;
+  const directional = Math.hypot(target.aimX - attacker.swingX, target.aimY + attacker.swingY) < 0.88;
   const damage = blocked ? Math.round(weapon.damage * (directional ? 0.12 : 0.36)) : weapon.damage;
   target.health = Math.max(0, target.health - damage);
   const details = { actorId: attacker.id, targetId: target.id, damage, directional };
@@ -338,11 +338,14 @@ function connectStrike(game, actor, weapon) {
   }
 }
 
-function beginAttack(game, actor, weapon) {
+function beginAttack(game, actor, weapon, input) {
+  const x = axis(input.attackX ?? input.aimX);
+  const y = axis(input.attackY ?? input.aimY);
+  const magnitude = Math.hypot(x, y);
   actor.attack = { time: 0, hit: false };
   actor.swing = 0;
-  actor.swingX = Math.abs(actor.aimX) + Math.abs(actor.aimY) > 0.12 ? actor.aimX : 0.65;
-  actor.swingY = actor.aimY;
+  actor.swingX = magnitude > 0.12 ? x / magnitude : 1;
+  actor.swingY = magnitude > 0.12 ? y / magnitude : 0;
   actor.stamina -= weapon.stamina;
   actor.regenDelay = 0.5;
   emit(game, 'swing', actor, { actorId: actor.id, weaponId: weapon.id });
@@ -365,7 +368,7 @@ function updateActor(game, actor, input, dt) {
   actor.guarding = Boolean(input.guard && actor.stamina > 7 && !actor.attack);
   const sprint = Boolean(input.sprint && actor.stamina > 5 && !actor.guarding && !actor.attack && (axis(input.moveX) || axis(input.moveZ)));
 
-  if (input.attack && !actor.guarding && !actor.attack && actor.stamina >= weapon.stamina) beginAttack(game, actor, weapon);
+  if (input.attack && !actor.guarding && !actor.attack && actor.stamina >= weapon.stamina) beginAttack(game, actor, weapon, input);
   moveActor(game, actor, input, dt, sprint && !actor.attack);
 
   if (sprint && !actor.attack) {

@@ -3,6 +3,7 @@ import { createWorld } from './world.js';
 import { WEAPONS, createGame, equipWeapon, getWeapon, nearbyPickup, stepGame } from './simulation.js';
 import { createRenderer } from './render.js';
 import { createHostSession, createGuestSession } from './network.js';
+import { createMouseSwing } from './mouse-swing.js';
 
 const element = (id) => document.getElementById(id);
 const menu = element('menu');
@@ -23,6 +24,7 @@ const networkOutput = element('network-output');
 const networkInput = element('network-input');
 const networkConnect = element('network-connect');
 const keys = new Set();
+const mouseSwing = createMouseSwing();
 const view = { yaw: 0, pitch: -0.16, firstPerson: false, actorId: undefined };
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 const localActor = () => networkRole === 'guest' ? match?.rival : match?.player;
@@ -40,12 +42,12 @@ let network;
 let networkRole;
 let remoteInput = {};
 let remoteInputAt = 0;
-let guestAttack = false;
+let guestSwing;
 let networkStepAt = 0;
 let lastFrame = 0;
 let accumulated = 0;
 let frameRequest;
-let attack = false;
+let pendingSwing;
 let guarding = false;
 let interact = false;
 let aimX = 0.65;
@@ -68,7 +70,8 @@ weaponSelect.value = 'steel-longsword';
 
 function releaseInput() {
   keys.clear();
-  attack = false;
+  mouseSwing.reset();
+  pendingSwing = undefined;
   interact = false;
   guarding = false;
 }
@@ -145,7 +148,7 @@ function disconnect() {
   networkRole = undefined;
   remoteInput = {};
   remoteInputAt = 0;
-  guestAttack = false;
+  guestSwing = undefined;
   previous?.close();
 }
 
@@ -188,7 +191,10 @@ function controls() {
 function activeLook(event) {
   if (!canPlay()) return;
   const locked = isCapturing();
-  if (!locked && event.target !== canvas) return;
+  if (!locked && event.target !== canvas) {
+    mouseSwing.reset();
+    return;
+  }
   const dx = clamp(event.movementX, -150, 150);
   const dy = clamp(event.movementY, -150, 150);
   if (!dx && !dy) return;
@@ -204,6 +210,10 @@ function activeLook(event) {
   const response = Math.min(magnitude / 17, 1);
   aimX += (dx / magnitude - aimX) * response;
   aimY += (-dy / magnitude - aimY) * response;
+  if (!guarding && localActor().alive) {
+    const swing = mouseSwing.move(dx, dy, event.timeStamp);
+    pendingSwing ??= swing;
+  }
   lastLookAt = performance.now();
 }
 
@@ -217,8 +227,9 @@ function makeInput() {
     moveX: forward * sin - side * cos,
     moveZ: forward * cos + side * sin,
     facing: view.yaw,
-    aimX, aimY, attack, interact, guard: guarding,
+    aimX, aimY, interact, guard: guarding,
     sprint: keys.has('ShiftLeft') || keys.has('ShiftRight'),
+    ...pendingSwing,
   };
 }
 
@@ -227,8 +238,11 @@ canvas.addEventListener('mousedown', (event) => {
   if (!canPlay()) return;
   event.preventDefault();
   if (!isCapturing()) capturePointer();
-  if (event.button === 0) attack = true;
-  if (event.button === 2) guarding = true;
+  if (event.button === 2) {
+    guarding = true;
+    pendingSwing = undefined;
+    mouseSwing.reset();
+  }
 });
 window.addEventListener('mouseup', (event) => {
   if (event.button === 2) guarding = false;
@@ -236,6 +250,8 @@ window.addEventListener('mouseup', (event) => {
 canvas.addEventListener('contextmenu', (event) => event.preventDefault());
 window.addEventListener('blur', releaseInput);
 document.addEventListener('pointerlockchange', () => {
+  mouseSwing.reset();
+  pendingSwing = undefined;
   if (!isCapturing() && !blockUnlock && !matchStarting && match?.status === 'playing') showPause();
   blockUnlock = false;
 });
@@ -305,18 +321,18 @@ function frame(now) {
     if (isOnline() && networkRole === 'guest') {
       if (now >= networkStepAt) {
         const sent = network?.send({ type: 'input', input: makeInput() });
-        if (sent) attack = false;
+        if (sent) pendingSwing = undefined;
         networkStepAt = now + 33;
       }
     } else if (canPlay() || isOnline()) {
       accumulated += elapsed;
       while (accumulated >= 1 / 60 && match.status === 'playing') {
         const input = makeInput();
-        const peer = now - remoteInputAt < 500 ? { ...remoteInput, attack: guestAttack } : {};
-        guestAttack = false;
+        const peer = now - remoteInputAt < 500 ? { ...remoteInput, ...guestSwing } : {};
+        guestSwing = undefined;
         stepGame(match, 1 / 60, input, peer);
         processEvents(match.events, now);
-        attack = false;
+        pendingSwing = undefined;
         interact = false;
         accumulated -= 1 / 60;
       }
@@ -392,8 +408,8 @@ function updateHud(now) {
   setText('hud-message', message);
   setText('hud-seed', `SEED ${world.seed}`);
   setText('hud-controls', arena
-    ? 'WASD Move · Mouse Aim · LMB Swing · RMB Guard'
-    : 'WASD Move · Mouse Aim · LMB Swing · RMB Guard · E Pick up · V Camera');
+    ? 'WASD Move · Flick Mouse to Swing · RMB Guard'
+    : 'WASD Move · Flick Mouse to Swing · RMB Guard · E Pick up · V Camera');
   element('hud-reticle').classList.toggle('guarding', player.guarding);
   drawMap(world, player);
 }
@@ -487,7 +503,10 @@ function applyOnlineMessage(message) {
       moveX: from.moveX, moveZ: from.moveZ, facing: from.facing,
       aimX: from.aimX, aimY: from.aimY, guard: from.guard === true, sprint: from.sprint === true,
     };
-    guestAttack ||= from.attack === true;
+    if (from.guard === true) guestSwing = undefined;
+    else if (from.attack === true && Number.isFinite(from.attackX) && Number.isFinite(from.attackY)) {
+      guestSwing ??= { attack: true, attackX: from.attackX, attackY: from.attackY };
+    }
     remoteInputAt = performance.now();
   } else if (networkRole === 'guest') {
     if (message.type === 'start' && !match && typeof message.seed === 'string' && /^[A-Z\d]{1,12}$/.test(message.seed)) {
