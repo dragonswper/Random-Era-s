@@ -227,8 +227,12 @@ export function createInterface(store, { onStart, onSettings, onExport, onCopySe
       if (control.type === 'checkbox') control.checked = state[key];
       else control.value = state[key];
       const label = document.querySelector(`[data-value="${key}"]`);
-      if (label) label.textContent = key === 'sensitivity' ? state[key].toFixed(2) + '×' : Math.round(state[key] * 100) + '%';
+      if (label) {
+        const multiplier = key === 'sensitivity' || key === 'swingDistance';
+        label.textContent = multiplier ? state[key].toFixed(2) + '×' : Math.round(state[key] * 100) + '%';
+      }
     }
+    element('controls-attack').textContent = state.attackInput === 'click' ? 'Left click' : 'Make a long, quick swipe';
     for (const [action, button] of keyButtons) button.textContent = MOVEMENT[action] + ' · ' + keyLabel(state.keys[action]);
   }
 
@@ -303,7 +307,7 @@ export async function showLoading({ countdown = false } = {}) {
   return {
     prepare() {
       message.textContent = 'Preparing the world…';
-      tip.textContent = 'Flick near the end of a swing to queue a follow-up.';
+      tip.textContent = 'Attack again near the end of a swing to queue a follow-up.';
       progress.value = 2;
     },
     done() {

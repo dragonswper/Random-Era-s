@@ -41,6 +41,7 @@ const { state: settings } = store;
 const view = { yaw: 0, pitch: -0.16, firstPerson: true, actorId: undefined };
 const cameraAim = { yaw: view.yaw, pitch: view.pitch };
 const GESTURE_LIFETIME_MS = 160;
+const MAX_GESTURE_LIFETIME_MS = 500;
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 const wrapAngle = (angle) => Math.atan2(Math.sin(angle), Math.cos(angle));
 const localActor = () => networkRole === 'guest' ? match?.rival : match?.player;
@@ -150,6 +151,10 @@ async function startMatch(mode, { worldSeed = newSeed(), arenaWeapon = weaponSel
     const prepared = prepareWorld(worldSeed, mode, { preset, era });
     const graphics = import('./render.js');
     const armor = import('./knight.js').then(({ loadKnight }) => loadKnight()).catch(() => null);
+    const mapKit = import('./map-kit.js').then(({ loadMapKit }) => loadMapKit()).catch((error) => {
+      console.warn('Map kit unavailable', error);
+      return null;
+    });
     loading = await showLoading({ countdown });
     const [world, { createRenderer }] = await Promise.all([prepared, graphics]);
     loading.prepare();
@@ -158,13 +163,15 @@ async function startMatch(mode, { worldSeed = newSeed(), arenaWeapon = weaponSel
     match = createGame(world, { arenaWeapon, startingWeapon: settings.weapon, versus: online ? 'online' : 'bot' });
     match.player.name = online && networkRole === 'guest' ? peerName : settings.playerName;
     if (online) match.rival.name = networkRole === 'guest' ? settings.playerName : peerName;
-    await Promise.race([armor, new Promise((resolve) => setTimeout(resolve, 3200))]);
+    const [, kit] = await Promise.race([
+      Promise.all([armor, mapKit]), new Promise((resolve) => setTimeout(() => resolve([]), 3200)),
+    ]);
     if (online && (network !== session || session?.status !== 'connected')) {
       returnToMenu();
       openError('The Arena connection closed before the duel began. Start a new invite to try again.');
       return false;
     }
-    renderer.setWorld(world);
+    renderer.setWorld(world, kit);
     Object.assign(view, {
       yaw: localActor().facing, pitch: -0.16,
       actorId: networkRole === 'guest' ? localActor().id : undefined,
@@ -277,34 +284,38 @@ function getComboProgress(player, now) {
   return comboProgress(player.combat, getWeapon(player.weaponId), lead);
 }
 
+function canAttack(player, combo) {
+  return player.alive && !guarding && (player.combat.phase === AttackPhase.IDLE || combo !== null);
+}
+
+function queueAttack(player, gesture, progress, now) {
+  if (!gesture || pendingGesture) return;
+  if (progress !== null) gesture.combo = { swingId: player.combat.swingId, progress };
+  pendingGesture = { value: gesture, at: now };
+}
+
 function sampleMouse(now, dt) {
-  if (pendingGesture && now - pendingGesture.at > GESTURE_LIFETIME_MS) pendingGesture = undefined;
+  // A click between frames gets a chance to reach the simulation on a slow renderer.
+  const lifetime = clamp(dt * 1000, GESTURE_LIFETIME_MS, MAX_GESTURE_LIFETIME_MS);
+  if (pendingGesture && now - pendingGesture.at > lifetime) pendingGesture = undefined;
   if (!canPlay() || !isCapturing()) return;
   const player = localActor();
-  const { phase, swingId } = player.combat;
+  const { phase } = player.combat;
   const progress = getComboProgress(player, now);
-  const canFlick = player.alive && !guarding && (phase === AttackPhase.IDLE || progress !== null);
-  const { dx, dy, velocity, gesture } = mouse.sample(dt, canFlick);
+  const canFlick = settings.attackInput === 'swipe' && canAttack(player, progress);
+  const { dx, dy, gesture } = mouse.sample(dt, canFlick, settings.swingDistance);
   const magnitude = Math.hypot(dx, dy);
   if (magnitude) {
     const response = Math.min(magnitude / 17, 1);
     aimX += (dx / magnitude - aimX) * response;
     aimY += (dy / magnitude - aimY) * response;
   }
-  if (gesture && !pendingGesture) {
-    if (progress !== null) gesture.combo = { swingId, progress };
-    pendingGesture = { value: gesture, at: now };
-  }
+  queueAttack(player, gesture, progress, now);
 
-  // The cut uses the flick vector while the camera holds its heading during contact.
-  if (phase === AttackPhase.ACTIVE_SWING) {
-    Object.assign(cameraAim, { yaw: view.yaw, pitch: view.pitch });
-    return;
-  }
-  if (velocity < CombatTuning.MinFlickVelocity) {
-    cameraAim.yaw = wrapAngle(cameraAim.yaw - dx * 0.0029 * settings.sensitivity);
-    cameraAim.pitch = clamp(cameraAim.pitch + dy * 0.0025 * settings.sensitivity * (settings.invert ? -1 : 1), -0.71, 0.61);
-  }
+  // Keep ordinary aim responsive at every speed. Soften the turn when the weapon cuts.
+  const look = settings.sensitivity * (gesture || phase === AttackPhase.ACTIVE_SWING ? 0.45 : 1);
+  cameraAim.yaw = wrapAngle(cameraAim.yaw - dx * 0.0029 * look);
+  cameraAim.pitch = clamp(cameraAim.pitch + dy * 0.0025 * look * (settings.invert ? -1 : 1), -0.71, 0.61);
   const blend = 1 - Math.exp(-17 * Math.min(dt, 0.07));
   view.yaw = wrapAngle(view.yaw + wrapAngle(cameraAim.yaw - view.yaw) * blend);
   view.pitch += (cameraAim.pitch - view.pitch) * blend;
@@ -331,11 +342,22 @@ function makeInput() {
 canvas.addEventListener('mousedown', (event) => {
   if (!canPlay()) return;
   event.preventDefault();
-  if (!isCapturing()) capturePointer();
+  const captured = isCapturing();
+  if (!captured) capturePointer();
   if (event.button === 2) {
     guarding = true;
     pendingGesture = undefined;
     mouse.reset();
+  }
+  if (event.button === 0 && captured && settings.attackInput === 'click') {
+    const player = localActor();
+    const now = performance.now();
+    const progress = getComboProgress(player, now);
+    if (canAttack(player, progress)) {
+      const speed = CombatTuning.MinFlickVelocity;
+      const gesture = makeFlick(aimX, aimY, speed) ?? makeFlick(1, 0, speed);
+      queueAttack(player, gesture, progress, now);
+    }
   }
 });
 window.addEventListener('mouseup', (event) => {
@@ -534,19 +556,20 @@ function updateHud(now) {
   const pickup = arena ? null : nearbyPickup(match);
   let message = now < noticeUntil ? notice : '';
   if (!player.alive && !arena && match.status === 'playing') message = `Returning to your fort in ${Math.ceil(player.respawnAt - match.time)}s`;
+  else if (!message && !isCapturing() && canPlay()) message = 'Click the game to capture the mouse';
   else if (!message && pickup) {
     const item = pickup.weaponId ? getWeapon(pickup.weaponId).name : pickup.item === 'medkit' ? 'Medkit' : 'Stamina Tonic';
     message = `[E] Pick up ${item}`;
   }
-  if (!isCapturing() && !message && match.status === 'playing') message = 'Click the game to capture the mouse';
   setText('hud-message', message);
   setText('hud-seed', `SEED ${world.seed}`);
   const bound = settings.keys;
   const directions = [bound.forward, bound.left, bound.back, bound.right].map(keyLabel);
   const movement = directions.join(directions.every((key) => key.length === 1) ? '' : '/');
+  const attack = settings.attackInput === 'click' ? 'LMB Swing' : 'Long Swipe to Swing';
   setText('hud-controls', arena
-    ? `${movement} Move · Flick to Swing · RMB Guard · Tab Status`
-    : `${movement} Move · Flick to Swing · RMB Guard · ${keyLabel(bound.pickup)} Pick up · V Camera · Tab Status`);
+    ? `${movement} Move · ${attack} · RMB Guard · Tab Status`
+    : `${movement} Move · ${attack} · RMB Guard · ${keyLabel(bound.pickup)} Pick up · V Camera · Tab Status`);
   element('hud-map').hidden = !settings.minimap;
   element('hud-dev').hidden = !settings.counters;
   if (settings.counters) {
@@ -832,7 +855,7 @@ networkConnect.addEventListener('click', async () => {
       if (network !== session) return;
       networkOutput.value = code;
       setText('network-output-label', 'Response code to send');
-      setText('network-status', 'Send this response to your friend. The duel starts when they apply it.');
+      setText('network-status', 'Send this response to your friend. Select Ready after they connect.');
       element('network-output-field').hidden = false;
     }
     if (network === session) element('network-input-field').hidden = true;
@@ -899,6 +922,10 @@ async function copyWorldLink() {
 function applySettings(key) {
   if (key === 'quality' || key === 'resolution') renderer?.setQuality(settings.quality, settings.resolution);
   if (key === 'master' || key === 'effects') swingAudio.setVolume(settings.master * settings.effects);
+  if (key === 'attackInput' || key === 'swingDistance') {
+    mouse.reset();
+    pendingGesture = undefined;
+  }
   if (match && key === 'terrainOverlay') drawMapBase(match.world);
   if (match?.world.mode === 'frontier' && key === 'frontierView') setPerspective(settings.frontierView === 'first-person');
   hudAt = 0;

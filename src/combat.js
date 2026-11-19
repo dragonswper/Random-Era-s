@@ -1,5 +1,7 @@
 export const CombatTuning = Object.freeze({
   MinFlickVelocity: 780, // Relative mouse units per second.
+  MinFlickDistance: 180, // Relative mouse units in a deliberate swipe.
+  FlickWindow: 0.135, // Seconds of recent motion that can contribute to a swipe.
   InputCooldown: 0.10, // Seconds after recovery before another windup.
   BufferWindow: 0.30, // Fraction at the end of the active swing.
 });

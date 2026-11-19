@@ -6,6 +6,7 @@ import { WorldTuning } from './world.js';
 import { getWeapon } from './simulation.js';
 
 const UP = new THREE.Vector3(0, 1, 0);
+const WHITE = new THREE.Color(0xffffff);
 const TAU = Math.PI * 2;
 const TRAIL_SEGMENTS = 24;
 const VIEW_MODEL_SCALE = 0.64;
@@ -104,7 +105,7 @@ function softShadowTexture() {
   return texture;
 }
 
-function scenery(world, geometries, shadowMaterial) {
+function scenery(world, geometries, shadowMaterial, mapKit) {
   const group = new THREE.Group();
   const instances = new Map();
   const transform = new THREE.Object3D();
@@ -113,7 +114,8 @@ function scenery(world, geometries, shadowMaterial) {
   let treeTile;
 
   function part(kind, paint, x, y, z, width, height, depth, yaw = 0, rx = 0, rz = 0) {
-    const key = treeTile ? `${kind}/${treeTile.x}/${treeTile.z}` : kind;
+    const id = typeof kind === 'string' ? kind : kind.id;
+    const key = treeTile ? `${id}/${treeTile.x}/${treeTile.z}` : id;
     if (!instances.has(key)) instances.set(key, { kind, tile: treeTile, entries: [] });
     instances.get(key).entries.push({ paint, x, y, z, width, height, depth, yaw, rx, rz });
   }
@@ -126,7 +128,15 @@ function scenery(world, geometries, shadowMaterial) {
     const place = (kind, paint, dx, dy, dz, width, height, depth, turn = 0, rx = 0, rz = 0) => {
       part(kind, paint, x + dx * cos + dz * sin, y + dy, z - dx * sin + dz * cos, width, height, depth, rotation + turn, rx, rz);
     };
-    return { place, y };
+    const use = (name, paint, width, height, depth, offset = 0) => {
+      const source = mapKit?.get(name);
+      if (!source) return false;
+      for (const piece of source) {
+        place(piece, paint[piece.colorSlot] ?? paint.main, 0, offset, 0, width, height, depth);
+      }
+      return true;
+    };
+    return { place, use, y };
   }
 
   for (const prop of world.props) {
@@ -140,20 +150,33 @@ function scenery(world, geometries, shadowMaterial) {
     const accent = color(region.accent);
     const cloth = color(region.cloth, '#b77e4d');
     const trunk = color(biome === 'sunscar' ? '#765440' : '#554b3c');
-    const { place, y } = propBuilder(prop);
+    const { place, use, y } = propBuilder(prop);
     if (kind === 'tree') {
       treeTile = { x: Math.floor(x / 27) * 27 + 13.5, z: Math.floor(z / 27) * 27 + 13.5 };
-      if (biome.includes('sunscar') || region.buildingStyle === 'desert') {
+      place('treeCard', tone(leaves, .96), 0, 1.75 * s, 0, 1.21 * s, 3.5 * s, 1.21 * s, rand * Math.PI);
+      shadows.push({ x, y, z, s: 1.25 * s });
+      const desert = biome.includes('sunscar');
+      const crystal = biome.includes('glass');
+      const frozen = biome.includes('frost');
+      const tree = biome === 'redcanopy' || rand < 0.48 ? 'oak' : rand < 0.78 ? 'fir' : 'pine';
+      const spread = tree === 'oak' ? 2.72 : tree === 'fir' ? 2.1 : 1.38;
+      const imported = !desert && !crystal && !frozen
+        && use(tree, { main: tone(leaves, 1.15), bark: trunk }, spread * s, 3.8 * s, spread * s);
+      if (imported) {
+        treeTile = undefined;
+        continue;
+      }
+      if (desert) {
         place('trunk', trunk, 0, 1.43 * s, 0, 0.27 * s, 2.86 * s, 0.27 * s, 0.3, 0.05, -0.08);
         for (let branch = 0; branch < 6; branch += 1) {
           const angle = branch * TAU / 6;
           place('cone', leaves, Math.sin(angle) * 0.45 * s, (2.84 + (branch % 2) * 0.12) * s, Math.cos(angle) * 0.45 * s, 0.32 * s, 1.35 * s, 0.22 * s, angle, Math.PI * 0.43);
         }
-      } else if (biome.includes('glass')) {
+      } else if (crystal) {
         place('trunk', tone(stone, 0.55), 0, 1.1 * s, 0, 0.27 * s, 2.5 * s, 0.27 * s, 0, 0.1, -0.18);
         place('boulder', leaves, 0.09 * s, 2.3 * s, 0, 1.35 * s, 2.2 * s, 1.23 * s, 0, 0.1, 0.25);
         place('boulder', tone(leaves, 1.34), 0.25 * s, 2.96 * s, 0.06 * s, 0.71 * s, 1.28 * s, 0.63 * s, 0.5, 0.18, 0.12);
-      } else if (biome.includes('frost') || rand > 0.52) {
+      } else if (frozen || rand > 0.52) {
         place('trunk', trunk, 0, 0.94 * s, 0, 0.34 * s, 1.9 * s, 0.34 * s);
         for (let layer = 0; layer < 3; layer += 1) {
           const width = (1.53 - layer * 0.33) * s;
@@ -161,7 +184,7 @@ function scenery(world, geometries, shadowMaterial) {
           const green = tone(leaves, 0.90 + layer * 0.12);
           const dy = (1.55 + layer * 0.62) * s;
           place('cone', green, 0, dy, 0, width, height, width, layer * 0.45);
-          if (biome.includes('frost')) {
+          if (frozen) {
             place('cone', color('#c9dfd6'), 0, dy + 0.13 * s, 0, width * 0.86, height * 0.87, width * 0.86, layer * 0.45);
           }
         }
@@ -171,15 +194,17 @@ function scenery(world, geometries, shadowMaterial) {
         place('boulder', tone(leaves, 1.24), 0.32 * s, 2.96 * s, 0, 1.44 * s, 1.45 * s, 1.35 * s, 0.45);
         if (rand < 0.28) place('rock', tone(leaves, 0.84), -0.64 * s, 2.15 * s, -0.16 * s, 1.28 * s, 1.03 * s, 0.99 * s, 0.66);
       }
-      place('treeCard', tone(leaves, .96), 0, 1.75 * s, 0, 1.21 * s, 3.5 * s, 1.21 * s, rand * Math.PI);
       treeTile = undefined;
-      shadows.push({ x, y, z, s: 1.25 * s });
     } else if (kind === 'rock') {
+      const grass = biome === 'ironwood' || biome === 'flintwake' ? tone(leaves, 0.84) : tone(stone, 0.88);
+      if (use(rand > 0.45 ? 'boulder' : 'slab', { main: stone, grass }, 1.42 * s, 0.94 * s, 1.23 * s)) continue;
       place('boulder', stone, 0, 0.24 * s, 0, 1.38 * s, 0.94 * s, 1.04 * s, rand * 4, 0.2, 0.18);
       if (s > 0.76) {
         place('rock', tone(stone, 0.77), 0.5 * s, 0.12 * s, -0.21 * s, 0.62 * s, 0.53 * s, 0.62 * s, rand);
       }
     } else if (kind === 'tuft') {
+      const bush = rand > 0.68 && biome !== 'sunscar' && biome !== 'frostfall';
+      if (use(bush ? 'bush' : 'grass', { main: leaves }, 0.78 * s, (bush ? 0.58 : 0.36) * s, 0.76 * s, 0.06)) continue;
       for (let blade = 0; blade < 3; blade += 1) {
         place('tapered', tone(leaves, 0.83 + blade * 0.19), (blade - 1) * 0.14 * s, 0.18 * s, (blade % 2) * 0.11 * s, 0.13 * s, (0.32 + 0.08 * blade) * s, 0.13 * s, blade, 0, (blade - 1) * 0.29);
       }
@@ -191,6 +216,7 @@ function scenery(world, geometries, shadowMaterial) {
       const width = prop.width || 3 * s;
       const height = prop.height || 2.3 * s;
       const depth = prop.depth || 0.62 * s;
+      if (architecture === 'timber' && use('castleWall', { main: stone.clone().lerp(WHITE, 0.67) }, width, height, depth)) continue;
       place('box', tone(stone, 0.73), 0, height * 0.31, 0, width + 0.05, height * 0.82, depth);
       place('box', tone(stone, 0.95), 0, height * 0.7, 0, width + 0.05, height * 0.12, depth + 0.1);
       if (world.mode !== 'frontier') {
@@ -213,6 +239,9 @@ function scenery(world, geometries, shadowMaterial) {
       const h = prop.height || (kind === 'tower' ? 3.8 : 3.1) * s;
       const width = prop.width || (kind === 'tower' ? 1.35 : 0.64) * s;
       const depth = prop.depth || width;
+      shadows.push({ x, y, z, s: width * 0.85 });
+      if (kind === 'tower' && architecture === 'timber'
+        && use('castleTower', { main: stone.clone().lerp(WHITE, 0.67) }, width, h, depth)) continue;
       place('box', tone(stone, 0.69), 0, 0.19 * h, 0, width * 1.13, h * 0.38, depth * 1.13);
       place('box', stone, 0, h * 0.59, 0, width, h * 0.69, depth);
       place('box', tone(stone, 1.21), 0, h * 0.9, 0, width * 1.17, h * 0.13, depth * 1.17);
@@ -225,7 +254,6 @@ function scenery(world, geometries, shadowMaterial) {
         }
         if (biome.includes('glass')) place('jewel', accent, 0, h * 1.16, 0, width * 0.38, h * 0.29, depth * 0.38);
       }
-      shadows.push({ x, y, z, s: width * 0.85 });
     } else if (kind === 'building') {
       const w = prop.width || 2.6 * s;
       const h = prop.height || 2.15 * s;
@@ -280,7 +308,9 @@ function scenery(world, geometries, shadowMaterial) {
         place('jewel', accent, w * 0.24, h * 1.68, -d * 0.22, 0.19, 0.28, 0.19);
       } else {
         const roof = color(biome.includes('frost') ? '#598291' : '#80563e');
-        place('roof', roof, 0, h * 1.12, 0, w * 1.28, h * 0.48, d * 1.28, Math.PI / 4);
+        if (architecture !== 'timber' || !use('cottageRoof', { main: roof.clone().lerp(WHITE, 0.62) }, w * 1.16, h * 0.47, d * 1.16, h * 0.96)) {
+          place('roof', roof, 0, h * 1.12, 0, w * 1.28, h * 0.48, d * 1.28, Math.PI / 4);
+        }
         if (biome.includes('frost')) {
           place('roof', color('#d8ebe2'), 0, h * 1.225, 0, w * 0.98, h * 0.32, d * 0.98, Math.PI / 4);
           place('box', tone(stone, 0.48), -w * 0.22, h * 1.26, d * 0.16, 0.22, h * 0.55, 0.22);
@@ -321,8 +351,9 @@ function scenery(world, geometries, shadowMaterial) {
   }
 
   for (const { kind, entries, tile } of instances.values()) {
-    const material = new THREE.MeshLambertMaterial({ side: kind === 'treeCard' ? THREE.DoubleSide : THREE.FrontSide });
-    const batch = new THREE.InstancedMesh(geometries[kind], material, entries.length);
+    const asset = typeof kind === 'string' ? null : kind;
+    const material = asset?.material ?? new THREE.MeshLambertMaterial({ side: kind === 'treeCard' ? THREE.DoubleSide : THREE.FrontSide });
+    const batch = new THREE.InstancedMesh(asset?.geometry ?? geometries[kind], material, entries.length);
     for (let i = 0; i < entries.length; i += 1) {
       const entry = entries[i];
       transform.position.set(entry.x, entry.y, entry.z);
@@ -988,7 +1019,7 @@ export function createRenderer(canvas) {
     }
   }
 
-  function setWorld(next) {
+  function setWorld(next, mapKit) {
     setViewModel(null);
     cleanGroup(sceneryRoot, sharedGeometries, sharedMaterials);
     cleanGroup(actorsRoot, sharedGeometries, sharedMaterials);
@@ -1011,7 +1042,11 @@ export function createRenderer(canvas) {
     sky.material.uniforms.haze.value.set(tint);
     sky.material.uniforms.zenith.value.set(arena ? '#826d64' : '#66585b');
     terrainView = createTerrainView(world);
-    sceneryView = scenery(world, geometries, shadowMaterial);
+    for (const parts of mapKit?.values() ?? []) for (const part of parts) {
+      sharedGeometries.add(part.geometry);
+      sharedMaterials.add(part.material);
+    }
+    sceneryView = scenery(world, geometries, shadowMaterial, mapKit);
     sceneryRoot.add(terrainView.group, sceneryView.group, backdrop(world, geometries));
   }
 

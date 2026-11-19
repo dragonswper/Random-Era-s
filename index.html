@@ -96,6 +96,7 @@
         <header class="screen-heading"><button class="back-link" type="button" data-go="home">← Home</button><div><h2 id="credits-title">Credits</h2></div></header>
         <div class="parchment credits-card">
           <p><strong>Armor Set</strong> by gimora. Textures resized and mesh parts separated and fitted for Random Eras. <a href="https://sketchfab.com/3d-models/armor-set-a28d0e34d39b47c59d599bf7bc790fb2">Original model</a> · <a href="https://creativecommons.org/licenses/by-nc-sa/4.0/">CC BY-NC-SA 4.0</a></p>
+          <p>Foliage, rocks and medieval structures by Kenney. <a href="https://kenney.nl/assets/nature-kit">Nature Kit</a> · <a href="https://kenney.nl/assets/castle-kit">Castle Kit</a> · <a href="https://creativecommons.org/publicdomain/zero/1.0/">CC0 1.0</a></p>
           <p>Training terminology informed by the community glossary. <a href="https://github.com/aiming-taxonomy/glossary">Aiming Taxonomy</a></p>
           <a href="https://github.com/dragonswper/Random-Era-s">Source on GitHub ↗</a>
         </div>
@@ -150,7 +151,7 @@
         </div>
         <div class="hud-caption" id="hud-caption" role="status"></div>
         <div class="hud-dev" id="hud-dev" hidden></div>
-        <div class="hud-controls" id="hud-controls">WASD Move · Flick Mouse to Swing · RMB Guard</div>
+        <div class="hud-controls" id="hud-controls">WASD Move · Long Swipe to Swing · RMB Guard</div>
       </div>
     </section>
 
@@ -159,8 +160,8 @@
         <header class="modal-header"><h2 id="controls-title">Controls</h2><button class="icon-button" type="button" data-close aria-label="Close controls">×</button></header>
         <dl class="controls-list">
           <div><dt>Move</dt><dd><kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd></dd></div>
-          <div><dt>Look and position your weapon</dt><dd>Move mouse gently</dd></div>
-          <div><dt>Swing in the direction of motion</dt><dd>Flick the mouse</dd></div>
+          <div><dt>Look and position your weapon</dt><dd>Move the mouse</dd></div>
+          <div><dt>Swing</dt><dd id="controls-attack">Make a long, quick swipe</dd></div>
           <div><dt>Guard</dt><dd>Hold right click</dd></div>
           <div><dt>Sprint</dt><dd><kbd>Shift</kbd></dd></div>
           <div><dt>Pick up nearby gear</dt><dd><kbd>E</kbd></dd></div>
@@ -169,7 +170,7 @@
           <div><dt>Match status</dt><dd><kbd>Tab</kbd></dd></div>
           <div><dt>Return to the menu</dt><dd><kbd>Esc</kbd></dd></div>
         </dl>
-        <p class="modal-note">Click the game to capture the mouse. Flick up, down, left, or right to swing. Flick again when a second ring appears on the reticle to queue a follow-up.</p>
+        <p class="modal-note">Click the game to capture the mouse. Choose your attack input in Settings. Attack again when a second ring appears on the reticle to queue a follow-up.</p>
       </div>
     </dialog>
 
@@ -180,7 +181,7 @@
           <section class="arena-fighter" aria-label="Your fighter"><span class="handwritten">you</span><div class="fighter-portrait warm" aria-hidden="true"></div><h3 data-profile-name>Wanderer</h3><p id="arena-self-status">Setting up</p></section>
           <div class="arena-middle">
             <strong class="versus">VS</strong>
-            <article class="parchment arena-rules"><h3 class="handwritten">House rules</h3><p>Melee weapons only. Flick to swing and hold right click to raise your shield.</p><p>One round. The walls stay shut.</p></article>
+            <article class="parchment arena-rules"><h3 class="handwritten">House rules</h3><p>Melee weapons only. Hold right click to raise your shield. Choose your attack input in Settings.</p><p>One round. The walls stay shut.</p></article>
             <dl class="camp-facts"><div><dt>Age</dt><dd id="arena-era-label"></dd></div><div><dt>Arena size</dt><dd>Small</dd></div></dl>
           </div>
           <section class="arena-fighter challenger" aria-label="Challenger"><span class="handwritten">challenger</span><div class="fighter-portrait cool" aria-hidden="true"></div><h3 id="arena-opponent">Pit sparring bot</h3><p id="arena-peer-status">Ready</p></section>
@@ -229,7 +230,9 @@
           <label>Combat effects <input type="range" data-setting="effects" min="0" max="1" step="0.05"><output data-value="effects"></output></label>
         </div>
         <div class="settings-panel" data-setting-panel="controls" hidden>
+          <label>Attack input <select data-setting="attackInput"><option value="swipe">Mouse swipe</option><option value="click">Left click</option></select></label>
           <label>Look sensitivity <input type="range" data-setting="sensitivity" min="0.35" max="2.5" step="0.05"><output data-value="sensitivity"></output></label>
+          <label>Swing distance <input type="range" data-setting="swingDistance" min="1" max="2" step="0.1"><output data-value="swingDistance"></output></label>
           <label>Invert look Y <input type="checkbox" data-setting="invert"></label>
           <div class="rebind-grid" id="rebind-controls"></div>
           <button type="button" class="ink-button" data-controls>View all controls</button>

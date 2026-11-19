@@ -1,13 +1,18 @@
 import { CombatTuning, makeFlick } from './combat.js';
 
-const REARM_TIME = 0.045;
+const REARM_TIME = 0.05;
 const STALE_FRAME_TIME = 0.75;
+const MIN_STRAIGHTNESS = 0.88;
 const NO_MOTION = Object.freeze({ dx: 0, dy: 0, velocity: 0, gesture: null });
+const { MinFlickVelocity, MinFlickDistance, FlickWindow } = CombatTuning;
 
-export function createMouseSwing(minVelocity = CombatTuning.MinFlickVelocity) {
+export function createMouseSwing() {
+  const stroke = [];
   let dx = 0;
   let dy = 0;
-  let quiet = REARM_TIME;
+  let time = 0;
+  let quiet = 0;
+  let spent = false;
 
   function addDelta(x, y) {
     if (!Number.isFinite(x) || !Number.isFinite(y)) return;
@@ -17,11 +22,38 @@ export function createMouseSwing(minVelocity = CombatTuning.MinFlickVelocity) {
   }
 
   function reset() {
-    dx = dy = 0;
-    quiet = REARM_TIME;
+    dx = dy = time = quiet = 0;
+    spent = false;
+    stroke.length = 0;
   }
 
-  function sample(dt, canFlick) {
+  function readStroke(dt, travel, minDistance) {
+    const cutoff = time - FlickWindow;
+    stroke.push({ x: dx, y: dy, travel, start: time - dt, end: time });
+    while (stroke[0].end <= cutoff) stroke.shift();
+
+    let x = 0;
+    let y = 0;
+    let path = 0;
+    // Start at the newest motion so a clear swipe can follow a turn in another direction.
+    for (let index = stroke.length - 1; index >= 0; index--) {
+      const part = stroke[index];
+      const start = Math.max(cutoff, part.start);
+      const weight = (part.end - start) / (part.end - part.start);
+      x += part.x * weight;
+      y += part.y * weight;
+      path += part.travel * weight;
+      const distance = Math.hypot(x, y);
+      const velocity = distance / (time - start);
+      // A long back-and-forth motion has plenty of travel and very little net distance.
+      if (distance >= minDistance && distance >= path * MIN_STRAIGHTNESS && velocity >= MinFlickVelocity) {
+        return makeFlick(x, y, velocity);
+      }
+    }
+    return null;
+  }
+
+  function sample(dt, canFlick, distanceMultiplier = 1) {
     if (!Number.isFinite(dt) || dt <= 0) return NO_MOTION;
     // Don't replay motion accumulated while the browser was stalled or inactive.
     if (dt > STALE_FRAME_TIME) {
@@ -29,14 +61,25 @@ export function createMouseSwing(minVelocity = CombatTuning.MinFlickVelocity) {
       return NO_MOTION;
     }
 
-    const velocity = Math.hypot(dx, dy) / dt;
+    time += dt;
+    const travel = Math.hypot(dx, dy);
+    const velocity = travel / dt;
     let gesture = null;
-    if (velocity >= minVelocity) {
-      if (canFlick && quiet >= REARM_TIME) gesture = makeFlick(dx, dy, velocity);
-      // A continuous fast swipe stays spent, even if it began in a locked phase.
+    if (velocity >= MinFlickVelocity) {
       quiet = 0;
+      // Motion that starts during guard or recovery cannot carry into a new swing.
+      if (!canFlick) spent = true;
+      if (!spent) gesture = readStroke(dt, travel, MinFlickDistance * distanceMultiplier);
+      if (gesture || spent) {
+        spent = true;
+        stroke.length = 0;
+      }
     } else {
-      quiet = Math.min(quiet + dt, REARM_TIME);
+      quiet += dt;
+      if (quiet >= REARM_TIME) {
+        spent = false;
+        stroke.length = 0;
+      }
     }
 
     const motion = { dx, dy, velocity, gesture };

@@ -1,8 +1,25 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { CombatTuning, makeFlick } from '../src/combat.js';
+import { lerp, riverProfile, routeDrainage } from '../src/landscape.js';
 import { createGame, equipWeapon, stepGame } from '../src/simulation.js';
 import { createWorld, hydrateWorld, worldData, WorldTuning } from '../src/world.js';
+
+test('watersheds route runoff from closed depressions through the lowest outlet', () => {
+  const heights = Float32Array.of(
+    9, 9, 9, 9, 9,
+    9, 5, 5, 5, 9,
+    9, 5, -3, 2, 0,
+    9, 5, 5, 5, 9,
+    9, 9, 9, 9, 9,
+  );
+  const { flow, downstream } = routeDrainage(heights, 5);
+  assert.equal(downstream[12], 13);
+  assert.equal(downstream[13], 14);
+  let drained = 0;
+  for (let i = 0; i < flow.length; i++) if (downstream[i] === -1) drained += flow[i];
+  assert.equal(drained, heights.length);
+});
 
 test('a configured Frontier terrain survives worker transfer and regenerates identically', () => {
   const config = { preset: 'large', era: 'redcanopy' };
@@ -52,6 +69,34 @@ test('Arena seeds keep symmetrical floor and valid spawns', () => {
   assert.equal(world.height(0, 4.35), world.height(0, -4.35));
   assert.ok(world.spawns.every(({ x, z }) => world.canMove(x, z)));
   assert.equal(world.canMove(0, 10), false);
+});
+
+test('Frontier roads pass through their gates and over dry crossings', () => {
+  const cases = [['small', 'ROADS-12'], ['small', 'ROADS-16'], ['medium', 'BALANCE'], ['large', 'ROADS-7']];
+  for (const [preset, seed] of cases) {
+    const world = createWorld(seed, 'frontier', { preset });
+    let crossing = 0;
+    for (const [from, to] of world.paths) {
+      const length = Math.hypot(to.x - from.x, to.z - from.z);
+      const steps = Math.ceil(length / 0.48);
+      let previous = world.height(from.x, from.z);
+      for (let i = 1; i <= steps; i++) {
+        const x = lerp(from.x, to.x, i / steps);
+        const z = lerp(from.z, to.z, i / steps);
+        const y = world.height(x, z);
+        const onCore = world.forts.some((fort) => Math.hypot(x - fort.x, z - fort.z) < 2);
+        if (!onCore) assert.ok(world.canMove(x, z, 0.47), `${preset} ${seed} has a blocked road`);
+        assert.ok(Math.abs(y - previous) / (length / steps) < 0.85, `${preset} ${seed} has a steep step`);
+        previous = y;
+        const river = riverProfile(world.river, z);
+        if (Math.abs(x - river.x) < river.width) {
+          assert.equal(world.waterAt(x, z), null);
+          crossing++;
+        }
+      }
+    }
+    assert.ok(crossing > 0);
+  }
 });
 
 test('training offers fixed and strafing targets, a knight loadout, and safe repeatable hits', () => {

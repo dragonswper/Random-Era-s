@@ -68,7 +68,7 @@ export function makeBiomes(regions, number, phase, size) {
   return { mix, regionAt };
 }
 
-export function makePaths(paths) {
+export function makePathDistanceSquared(paths) {
   return (x, z) => {
     let nearest = Infinity;
     for (const [from, to] of paths) {
@@ -77,8 +77,13 @@ export function makePaths(paths) {
       const t = clamp(((x - from.x) * dx + (z - from.z) * dz) / (dx * dx + dz * dz || 1), 0, 1);
       nearest = Math.min(nearest, (x - from.x - dx * t) ** 2 + (z - from.z - dz * t) ** 2);
     }
-    return 1 - smoothstep(0.62, 4.65, nearest);
+    return nearest;
   };
+}
+
+export function makePaths(paths) {
+  const distanceSquared = makePathDistanceSquared(paths);
+  return (x, z) => 1 - smoothstep(0.62, 4.65, distanceSquared(x, z));
 }
 
 export function riverProfile(river, z) {
@@ -86,6 +91,77 @@ export function riverProfile(river, z) {
   const curve = Math.sin(z * 0.046 + river.phase) * river.meander + Math.sin(z * 0.11 + river.phase * 1.2) * 1.8;
   const lake = Math.exp(-(((z - river.lake) / 7.5) ** 2));
   return { x: curve, width: river.width + lake * river.lakeWidth, y: 0.10 + z * 0.004 };
+}
+
+export function routeDrainage(heights, width) {
+  const level = new Float32Array(heights.length);
+  const downstream = new Int32Array(heights.length).fill(-2);
+  const order = [];
+  const heap = [];
+  const before = (a, b) => level[a] < level[b] || (level[a] === level[b] && a < b);
+
+  function enter(index, outlet, height) {
+    downstream[index] = outlet;
+    level[index] = height;
+    let at = heap.length;
+    heap.push(index);
+    while (at > 0) {
+      const parent = (at - 1) >> 1;
+      if (!before(index, heap[parent])) break;
+      heap[at] = heap[parent];
+      at = parent;
+    }
+    heap[at] = index;
+  }
+
+  function take() {
+    const result = heap[0];
+    const tail = heap.pop();
+    if (!heap.length) return result;
+    let at = 0;
+    while (at * 2 + 1 < heap.length) {
+      let child = at * 2 + 1;
+      if (child + 1 < heap.length && before(heap[child + 1], heap[child])) child++;
+      if (!before(heap[child], tail)) break;
+      heap[at] = heap[child];
+      at = child;
+    }
+    heap[at] = tail;
+    return result;
+  }
+
+  // Work inland from the lowest outlets. Depressions inherit the spill level of their exit.
+  for (let side = 0; side < width; side++) {
+    enter(side, -1, heights[side]);
+    const far = width * (width - 1) + side;
+    enter(far, -1, heights[far]);
+  }
+  for (let row = 1; row < width - 1; row++) {
+    const left = row * width;
+    enter(left, -1, heights[left]);
+    const right = left + width - 1;
+    enter(right, -1, heights[right]);
+  }
+  while (heap.length) {
+    const index = take();
+    order.push(index);
+    const x = index % width;
+    const z = Math.floor(index / width);
+    for (let row = Math.max(0, z - 1); row <= Math.min(width - 1, z + 1); row++) {
+      for (let col = Math.max(0, x - 1); col <= Math.min(width - 1, x + 1); col++) {
+        const next = row * width + col;
+        if (downstream[next] === -2) enter(next, index, Math.max(heights[next], level[index]));
+      }
+    }
+  }
+
+  const flow = new Float32Array(heights.length).fill(1);
+  for (let i = order.length - 1; i >= 0; i--) {
+    const index = order[i];
+    const outlet = downstream[index];
+    if (outlet >= 0) flow[outlet] += flow[index];
+  }
+  return { flow, downstream };
 }
 
 function erode(heights, width, strength) {
@@ -104,24 +180,101 @@ function erode(heights, width, strength) {
     for (let i = 0; i < heights.length; i++) heights[i] += shifts[i];
   }
 
-  // Route rainfall downhill in elevation order, then carve only the draining cells.
-  const order = Array.from(heights.keys()).sort((a, b) => heights[b] - heights[a]);
-  const flow = new Float32Array(heights.length).fill(1);
+  const { flow, downstream } = routeDrainage(heights, width);
   const cut = new Float32Array(heights.length);
-  for (const i of order) {
-    const x = i % width;
-    const z = Math.floor(i / width);
-    if (!x || !z || x === width - 1 || z === width - 1) continue;
-    let sink = i;
-    for (const next of [i - 1, i + 1, i - width, i + width]) if (heights[next] < heights[sink]) sink = next;
-    if (sink === i) continue;
-    flow[sink] += flow[i];
+  for (let i = 0; i < heights.length; i++) {
+    const sink = downstream[i];
+    if (sink < 0 || heights[sink] >= heights[i]) continue;
     const sediment = Math.min(0.39, Math.log1p(flow[i] - 1) * 0.07) * strength;
     cut[i] -= sediment;
     cut[sink] += sediment * 0.16;
   }
   for (let i = 0; i < heights.length; i++) heights[i] += cut[i];
   return flow;
+}
+
+function gradeRoads(grid, routes, river, tuning) {
+  const edge = grid.size / 2;
+  const gap = new Float32Array(grid.heights.length);
+  const routeHeight = new Float32Array(grid.heights.length);
+  const roadHeight = new Float32Array(grid.heights.length);
+  const weightSum = new Float32Array(grid.heights.length);
+  const coverage = new Float32Array(grid.heights.length);
+  const maxGrade = tuning.roadGrade;
+  const bankWidth = tuning.roadBankWidth;
+  const roadWidth = tuning.roadWidth;
+
+  function stamp(from, to) {
+    const dx = to.x - from.x;
+    const dz = to.z - from.z;
+    const length = dx * dx + dz * dz || 1;
+    const left = Math.floor((Math.min(from.x, to.x) + edge - bankWidth) / grid.step);
+    const right = Math.ceil((Math.max(from.x, to.x) + edge + bankWidth) / grid.step);
+    const top = Math.floor((Math.min(from.z, to.z) + edge - bankWidth) / grid.step);
+    const bottom = Math.ceil((Math.max(from.z, to.z) + edge + bankWidth) / grid.step);
+    for (let row = Math.max(0, top); row <= Math.min(grid.width - 1, bottom); row++) {
+      for (let col = Math.max(0, left); col <= Math.min(grid.width - 1, right); col++) {
+        const x = col * grid.step - edge;
+        const z = row * grid.step - edge;
+        const t = clamp(((x - from.x) * dx + (z - from.z) * dz) / length, 0, 1);
+        const distance = Math.hypot(x - from.x - dx * t, z - from.z - dz * t);
+        const index = row * grid.width + col;
+        if (distance < bankWidth && distance < gap[index]) {
+          gap[index] = distance;
+          routeHeight[index] = lerp(from.y, to.y, t);
+        }
+      }
+    }
+  }
+
+  for (const route of routes) {
+    gap.fill(Infinity);
+    const { x, z, elevation } = route[0];
+    const points = [{ x, z, y: elevation }];
+    let padEnd = 0;
+    for (let segment = 1; segment < route.length; segment++) {
+      const from = route[segment - 1];
+      const to = route[segment];
+      const steps = Math.max(1, Math.ceil(Math.hypot(to.x - from.x, to.z - from.z) / grid.step));
+      for (let i = 1; i <= steps; i++) {
+        const x = lerp(from.x, to.x, i / steps);
+        const z = lerp(from.z, to.z, i / steps);
+        const stream = riverProfile(river, z);
+        const nearWater = Math.abs(x - stream.x) <= stream.width * 1.23;
+        const natural = sampleGrid(grid, x, z);
+        const raised = nearWater ? Math.max(natural, stream.y + 0.28) : natural;
+        const y = segment === 1 ? elevation : raised;
+        points.push({ x, z, y });
+      }
+      if (segment === 1) padEnd = points.length - 1;
+    }
+
+    // Run the slope limit from both ends so the fort pad and the shared junction stay connected.
+    for (let i = points.length - 2; i > padEnd; i--) {
+      const anchor = points[i + 1];
+      const point = points[i];
+      const change = Math.hypot(point.x - anchor.x, point.z - anchor.z) * maxGrade;
+      point.y = clamp(point.y, anchor.y - change, anchor.y + change);
+    }
+    for (let i = 1; i < points.length; i++) {
+      const anchor = points[i - 1];
+      const point = points[i];
+      const change = Math.hypot(point.x - anchor.x, point.z - anchor.z) * maxGrade;
+      point.y = clamp(point.y, anchor.y - change, anchor.y + change);
+      stamp(anchor, point);
+    }
+    // At intersections, blend nearby grades to avoid a sudden seam between two roads.
+    for (let i = 0; i < gap.length; i++) {
+      if (gap[i] >= bankWidth) continue;
+      const weight = (1 - smoothstep(0, bankWidth, gap[i])) ** 2;
+      weightSum[i] += weight;
+      roadHeight[i] += weight * routeHeight[i];
+      coverage[i] = Math.max(coverage[i], 1 - smoothstep(roadWidth, bankWidth, gap[i]));
+    }
+  }
+  for (let i = 0; i < grid.heights.length; i++) {
+    if (weightSum[i] > 0) grid.heights[i] = lerp(grid.heights[i], roadHeight[i] / weightSum[i], coverage[i]);
+  }
 }
 
 export function sampleGrid(grid, x, z, values = grid.heights) {
@@ -147,7 +300,7 @@ export function flattenPad(grid, x, z, radius, feather, y) {
   }
 }
 
-export function buildLandscape({ number, size, regions, mix, pathAt, river, forts, tuning }) {
+export function buildLandscape({ number, size, regions, mix, pathAt, river, forts, routes, tuning }) {
   const width = Math.ceil(size / tuning.sampleSpacing) + 1;
   const step = size / (width - 1);
   const heights = new Float32Array(width * width);
@@ -183,5 +336,8 @@ export function buildLandscape({ number, size, regions, mix, pathAt, river, fort
     if (bank > 0 && ford > 0) heights[index] = lerp(heights[index], stream.y + 0.075, ford * bank);
   }
   for (const fort of forts) flattenPad(grid, fort.x, fort.z, 7.7, 6.0, fort.elevation);
+  gradeRoads(grid, routes, river, tuning);
+  // The road grades meet each courtyard without changing its spawn or core elevation.
+  for (const fort of forts) flattenPad(grid, fort.x, fort.z, 7.7, 2.3, fort.elevation);
   return grid;
 }

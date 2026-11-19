@@ -1,4 +1,4 @@
-import { buildLandscape, clamp, flattenPad, hashSeed, lerp, makeBiomes, makePaths, noise, riverProfile, sampleGrid, seededRandom, smoothstep } from './landscape.js';
+import { buildLandscape, clamp, flattenPad, hashSeed, lerp, makeBiomes, makePathDistanceSquared, makePaths, noise, riverProfile, sampleGrid, seededRandom, smoothstep } from './landscape.js';
 
 export const REGIONS = Object.freeze([
   Object.freeze({
@@ -53,6 +53,9 @@ export const WorldTuning = Object.freeze({
   chunkSize: 26,
   doorWidth: 1.32,
   wallThickness: 0.22,
+  roadGrade: 0.24,
+  roadWidth: 1.35,
+  roadBankWidth: 3.4,
 });
 const ARENA_SIZE = 26;
 const ARENA_LIMIT = 9;
@@ -140,23 +143,20 @@ function createFrontier(seed, number, settings) {
     };
   });
 
-  const paths = [];
   const crossroads = { x: range(-3, 3), z: range(-3, 3) };
-  for (const fort of forts) {
-    const route = [
-      fort,
-      { x: fort.x, z: fort.z - Math.sign(fort.z) * 8.6 },
-      { x: fort.x * 0.73 + range(-2, 2), z: fort.z * 0.47 + range(-2, 2) },
-      { x: fort.x * 0.39 + range(-1, 1), z: fort.z * 0.16 + range(-2, 2) },
-      crossroads,
-    ];
-    for (let index = 1; index < route.length; index++) {
-      paths.push([route[index - 1], route[index]]);
-    }
-  }
+  const routes = forts.map((fort) => {
+    const side = Math.sign(fort.z);
+    const gate = { x: fort.x, z: fort.z - side * 8.6 };
+    const bend = { x: fort.x * 0.73 + range(-2, 2), z: fort.z * 0.47 + range(-2, 2) };
+    // On small maps the bend still needs to lead away from the gate towers.
+    bend.z = side * Math.min(side * bend.z, Math.abs(gate.z) - 0.75);
+    return [fort, gate, bend, { x: fort.x * 0.39 + range(-1, 1), z: fort.z * 0.16 + range(-2, 2) }, crossroads];
+  });
+  const paths = routes.flatMap((route) => route.slice(1).map((point, index) => [route[index], point]));
 
   const pathAt = makePaths(paths);
-  const terrain = buildLandscape({ number, size, regions, mix: biomes.mix, pathAt, river, forts, tuning: WorldTuning });
+  const distanceToPathSquared = makePathDistanceSquared(paths);
+  const terrain = buildLandscape({ number, size, regions, mix: biomes.mix, pathAt, river, forts, routes, tuning: WorldTuning });
   const data = { seed, mode: 'frontier', number, ridgePhase, size, limit: size / 2 - 1.2,
     regions, forts, terrain, paths, river, settings, spawns: forts.map(({ spawn }) => spawn), props: [] };
   const environment = frontierEnvironment(data);
@@ -210,23 +210,20 @@ function createFrontier(seed, number, settings) {
       }
     };
 
-    scatter('tree', theme.trees, 0.75, 1.85, 0.35);
-    scatter('rock', theme.rocks, 0.62, 2.1, 0.46);
-    scatter(theme.vegetation, theme.details, 0.44, 1.35);
-    scatter(theme.landmark, 8, 1.3, 2.3, 0.5);
-    scatter('ruin', 3, 0.85, 1.7, 0.72);
-
     const buildingWidth = range(2.35, 3.45);
     const buildingDepth = range(2.15, 3.2);
     const buildingHeight = range(2.35, 3.35);
+    const pad = Math.max(buildingWidth, buildingDepth) * 0.68;
     let cottages = 0;
     const cottagesWanted = settings.preset === 'small' ? 1 : settings.preset === 'large' ? 3 : 2;
     for (let attempt = 0; attempt < 105 && cottages < cottagesWanted; attempt++) {
-      const x = range(8, size / 2 - 8) * quadrant.x;
-      const z = range(8, size / 2 - 8) * quadrant.z;
-      if (pathAt(x, z) > 0.04 || waterAt(x, z) !== null || !movement.canMove(x, z, 2.75)) continue;
-      if (forts.some((fort) => Math.hypot(x - fort.x, z - fort.z) < 12.5)) continue;
-      flattenPad(terrain, x, z, Math.max(buildingWidth, buildingDepth) * 0.68, 2.4, height(x, z));
+      const x = range(8, size / 2 - 6) * quadrant.x;
+      const z = range(8, size / 2 - 6) * quadrant.z;
+      const roadClearance = (Math.sqrt(distanceToPathSquared(x, z)) - WorldTuning.roadWidth - terrain.step) / Math.SQRT2;
+      const fortClearance = Math.min(...forts.map((fort) => Math.max(Math.abs(x - fort.x), Math.abs(z - fort.z)))) - 8.7;
+      const feather = Math.min(2.4, roadClearance - pad, fortClearance - pad);
+      if (feather < 0.85 || waterAt(x, z) !== null || !movement.canMove(x, z, 2.75)) continue;
+      flattenPad(terrain, x, z, pad, feather, height(x, z));
       place('building', x, z, {
         width: buildingWidth,
         height: buildingHeight,
@@ -241,6 +238,12 @@ function createFrontier(seed, number, settings) {
       }
       cottages++;
     }
+
+    scatter('tree', theme.trees, 0.75, 1.85, 0.35);
+    scatter('rock', theme.rocks, 0.62, 2.1, 0.46);
+    scatter(theme.vegetation, theme.details, 0.44, 1.35);
+    scatter(theme.landmark, 8, 1.3, 2.3, 0.5);
+    scatter('ruin', 3, 0.85, 1.7, 0.72);
   }
 
   return { ...data, ...environment, canMove: movement.canMove };

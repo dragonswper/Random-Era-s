@@ -3,24 +3,60 @@ import test from 'node:test';
 import { CombatTuning, makeFlick } from '../src/combat.js';
 import { createMouseSwing, createRelativeMouse } from '../src/mouse-swing.js';
 
-const { MinFlickVelocity } = CombatTuning;
+const { MinFlickDistance, MinFlickVelocity } = CombatTuning;
 
-test('frame velocity distinguishes slow look from identical fast motion', () => {
+test('fast short corrections and steady turns keep their full look deltas', () => {
   const mouse = createMouseSwing();
-  const delta = MinFlickVelocity / 64;
-  mouse.addDelta(0, delta);
-  assert.equal(mouse.sample(1 / 32, true).gesture, null);
-  mouse.addDelta(0, delta / 2);
-  mouse.addDelta(0, delta / 2);
-  const frame = mouse.sample(1 / 64, true);
-  assert.equal(frame.velocity, MinFlickVelocity);
-  assert.deepEqual(frame.gesture, {
-    x: 0, y: -1, angle: -90, direction: 'DOWN', velocity: MinFlickVelocity,
-  });
+  mouse.addDelta(0, 30);
+  assert.deepEqual(mouse.sample(1 / 120, true), { dx: 0, dy: -30, velocity: 3600, gesture: null });
+  mouse.reset();
+  for (let frame = 0; frame < 60; frame++) {
+    mouse.addDelta(17, 0);
+    const motion = mouse.sample(1 / 60, true);
+    assert.equal(motion.dx, 17);
+    assert.equal(motion.gesture, null);
+  }
+});
 
-  const doubleRate = createMouseSwing();
-  doubleRate.addDelta(0, delta / 2);
-  assert.equal(doubleRate.sample(1 / 128, true).gesture.direction, 'DOWN');
+test('a long coherent flick works at several frame rates', () => {
+  for (const fps of [30, 60, 120, 240]) {
+    const mouse = createMouseSwing();
+    const velocity = MinFlickDistance / 0.075;
+    const frameCount = Math.ceil(0.1 * fps);
+    const gestures = [];
+    for (let frame = 0; frame < frameCount; frame++) {
+      mouse.addDelta(0, velocity / fps);
+      const { gesture } = mouse.sample(1 / fps, true);
+      if (gesture) gestures.push(gesture);
+    }
+    assert.equal(gestures.length, 1, `${fps} FPS`);
+    assert.equal(gestures[0].direction, 'DOWN');
+    assert.ok(Math.abs(gestures[0].velocity - velocity) < 1e-6);
+  }
+});
+
+test('jitter and a raised distance setting require a fresh, larger swipe', () => {
+  const mouse = createMouseSwing();
+  for (let frame = 0; frame < 30; frame++) {
+    mouse.addDelta(frame % 2 ? 62 : -62, 0);
+    assert.equal(mouse.sample(1 / 60, true).gesture, null);
+  }
+  mouse.reset();
+  mouse.addDelta(MinFlickDistance * 1.35, 0);
+  assert.equal(mouse.sample(1 / 60, true, 1.5).gesture, null);
+  mouse.sample(0.06, true, 1.5);
+  mouse.addDelta(MinFlickDistance * 1.6, 0);
+  assert.equal(mouse.sample(1 / 60, true, 1.5).gesture.direction, 'RIGHT');
+});
+
+test('a slow frame contributes only the motion inside the swipe window', () => {
+  const mouse = createMouseSwing();
+  mouse.addDelta(MinFlickDistance * 1.1, 0);
+  const frame = mouse.sample(0.2, true);
+  assert.ok(frame.velocity > MinFlickVelocity);
+  assert.equal(frame.gesture, null);
+  mouse.addDelta(MinFlickDistance, 0);
+  assert.equal(mouse.sample(1 / 60, true).gesture.direction, 'RIGHT');
 });
 
 test('angles select four sectors while retaining the swipe vector for rendering', () => {
@@ -39,14 +75,14 @@ test('angles select four sectors while retaining the swipe vector for rendering'
 
 test('a continuous swipe cannot retrigger when a locked phase opens', () => {
   const mouse = createMouseSwing();
-  mouse.addDelta(28, 0);
+  mouse.addDelta(MinFlickDistance, 0);
   assert.equal(mouse.sample(1 / 60, false).gesture, null);
-  mouse.addDelta(28, 0);
+  mouse.addDelta(MinFlickDistance, 0);
   assert.equal(mouse.sample(1 / 60, true).gesture, null);
   mouse.sample(0.05, true);
-  mouse.addDelta(-28, 0);
+  mouse.addDelta(-MinFlickDistance, 0);
   assert.equal(mouse.sample(1 / 60, true).gesture.direction, 'LEFT');
-  mouse.addDelta(-28, 0);
+  mouse.addDelta(-MinFlickDistance, 0);
   assert.equal(mouse.sample(1 / 60, true).gesture, null);
 });
 
@@ -71,7 +107,7 @@ test('the browser listener captures only locked movement and falls back to relat
     },
   };
   const mouse = createRelativeMouse(canvas);
-  const move = () => mockDocument.dispatchEvent(Object.assign(new Event('mousemove'), { movementX: 0, movementY: -30 }));
+  const move = () => mockDocument.dispatchEvent(Object.assign(new Event('mousemove'), { movementX: 0, movementY: -MinFlickDistance }));
   move();
   assert.equal(mouse.sample(1 / 60, true).gesture, null);
   await mouse.capture();

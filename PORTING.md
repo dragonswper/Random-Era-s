@@ -11,6 +11,7 @@ The default world uses broken ridgelines, tree silhouettes, warm haze and stone 
 | `src/world-worker.js` | Background generation and transferable height/flow buffers | Task Graph jobs | Jobs and NativeArray |
 | `src/terrain-view.js` | Streamed near tiles, distance tiers and seam skirts | Landscape component LOD | Terrain tiles and LOD Group |
 | `src/render.js` | Instancing, distant tree cards, structure kits, lighting and 3D actors | ISM/HISM components and material instances | GPU instancing and LOD Groups |
+| `public/map-kit.glb` | Named foliage, rock and castle meshes in unit bounds with their bases at ground level | Static meshes and instanced materials | Prefabs and instanced materials |
 | `src/combat.js` | Swipe vectors, combat phases, buffer and cooldown | Enhanced Input and deterministic gameplay component | Input System and C# state machine |
 | `src/simulation.js` | Fixed-step movement, collision, weapons, training AI and objectives | C++ world subsystem | C# fixed-step simulation |
 
