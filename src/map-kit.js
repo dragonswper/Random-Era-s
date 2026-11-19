@@ -1,5 +1,5 @@
 import { MeshLambertMaterial } from 'three';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { loadModel } from './assets.js';
 
 let request;
 export const foliageWind = { value: 0 };
@@ -18,8 +18,7 @@ function makeFinish(mesh, animated) {
 
 
 export function loadMapKit() {
-  const loader = new GLTFLoader();
-  request ??= Promise.all(['map-kit', 'era-props'].map((name) => loader.loadAsync(`${import.meta.env.BASE_URL}${name}.glb?art=1`)))
+  request ??= Promise.all(['map-kit', 'era-props'].map((name) => loadModel(name, 2)))
     .then((groups) => {
       const kit = new Map();
       const finishes = new Map();

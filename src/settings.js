@@ -25,7 +25,7 @@ const RANGES = {
   sensitivity: [0.35, 2.5], swingDistance: [0.75, 2], swipeSpeed: [0.75, 1.75], swingResponse: [0.5, 1.5], bufferWindow: [0.15, 0.45], uiScale: [0.9, 1.3],
 };
 
-export function createSettingsStore() {
+export function createSettingsStore(storage) {
   const saveKey = 'random-eras.settings.v2';
   const state = { ...DEFAULT_SETTINGS, keys: { ...DEFAULT_KEYS } };
   const listeners = new Set();
@@ -51,18 +51,20 @@ export function createSettingsStore() {
     return true;
   }
 
-  try {
-    const saved = JSON.parse(localStorage.getItem(saveKey));
-    for (const [key, value] of Object.entries(saved || {})) assign(key, value);
-  } catch {
-    // Private browsing and restrictive storage policies still allow session settings.
+  for (const key of ['random-eras.settings.v1', saveKey]) {
+    try {
+      const saved = JSON.parse((storage ?? globalThis.localStorage).getItem(key));
+      for (const [name, value] of Object.entries(saved || {})) assign(name, value);
+    } catch {
+      // Private browsers and damaged saves still allow a fresh session.
+    }
   }
 
   return {
     state,
     set(key, value) {
       if (!assign(key, value)) return;
-      try { localStorage.setItem(saveKey, JSON.stringify(state)); } catch { /* Session settings are retained. */ }
+      try { (storage ?? globalThis.localStorage).setItem(saveKey, JSON.stringify(state)); } catch { /* Session settings are retained. */ }
       for (const listener of listeners) listener(key, state);
     },
     subscribe(listener) {

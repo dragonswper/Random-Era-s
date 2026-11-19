@@ -345,3 +345,10 @@
 .is-ready { animation: stamp-ready var(--campaign-speed, 160ms) ease-out; }
 @media (prefers-reduced-motion: reduce) { .campaign-screen .parchment, .is-ready { animation: none; } }
 [data-reduced-motion='true'] .campaign-screen .parchment, [data-reduced-motion='true'] .is-ready { animation: none; }
+
+#error-dialog[data-webgl="true"] {
+  width: 100vw; max-width: none; height: 100dvh; max-height: none; margin: 0;
+  background: var(--campaign-night);
+}
+#error-dialog[data-webgl="true"] .modal-card { max-width: 36rem; margin: 20vh auto 0; }
+#webgl-help a { color: var(--campaign-gold); }

@@ -26,9 +26,14 @@ else:
     for obj in bpy.context.scene.objects:
         if obj.name.endswith('_collider'):
             obj.select_set(False)
-    bpy.ops.export_scene.gltf(filepath=str(destination / (source.stem + '.glb')), export_format='GLB',
-                             use_selection=True, export_yup=True, export_apply=True, export_extras=True,
-                             export_animations=False, export_materials='EXPORT')
+    with tempfile.TemporaryDirectory() as scratch:
+        raw = Path(scratch) / source.with_suffix('.glb').name
+        bpy.ops.export_scene.gltf(filepath=str(raw), export_format='GLB',
+                                 use_selection=True, export_yup=True, export_apply=True, export_extras=True,
+                                 export_animations=False, export_materials='EXPORT')
+        packer = source.parents[2] / 'node_modules' / 'gltfpack' / 'cli.js'
+        subprocess.run(['node', str(packer), '-i', str(raw), '-o', str(destination / raw.name),
+                        '-c', '-vpf', '-kn', '-km', '-ke'], check=True)
     if source.stem == 'era-props':
         colliders = {}
         for obj in bpy.context.scene.objects:

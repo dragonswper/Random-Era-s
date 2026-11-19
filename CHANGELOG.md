@@ -27,3 +27,10 @@
 - An old invite tells both players to refresh. Connection loss clears stale attack input.
 - Guest movement eases on the host and fades when packets stop.
 - Transport tests cover malformed messages, large payloads and invite round trips.
+
+## E. Reliability
+
+- Meshopt compression reduces the download size and keeps the Blender pivots intact.
+- A failed model fetch retries once. The world can draw with simple shapes while assets load.
+- A WebGL 2 startup failure opens a full-screen explanation with browser help.
+- Storage tests cover old settings and a damaged Career save. World tests compare serialized bytes in all modes and sizes.

@@ -128,3 +128,14 @@ test('training offers fixed and strafing targets, a knight loadout, and safe rep
   assert.equal(match.player.health, 100);
   assert.equal(match.status, 'playing');
 });
+
+test('each size and mode produces byte-identical serialized world data', async () => {
+  const { serialize } = await import('node:v8');
+  for (const mode of ['frontier', 'arena', 'training']) {
+    for (const preset of ['small', 'medium', 'large']) {
+      const config = { era: 'sunscar', preset };
+      const bytes = () => serialize(worldData(createWorld('DAY-20261120', mode, config)));
+      assert.deepEqual(bytes(), bytes(), `${mode} ${preset}`);
+    }
+  }
+});

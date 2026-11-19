@@ -1,5 +1,5 @@
 import { Quaternion, Vector3 } from 'three';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { loadModel } from './assets.js';
 
 const gripNames = { negative: 'sword-grip', positive: 'shield-grip' };
 const gripOffset = new Vector3();
@@ -25,7 +25,7 @@ function armNodes(model, side) {
 }
 
 export function loadKnight() {
-  knightRequest ??= new GLTFLoader().loadAsync(`${import.meta.env.BASE_URL}knight.glb?rig=3`)
+  knightRequest ??= loadModel('knight', 4)
     .then(({ scene }) => {
       const required = ['body', 'helm', 'cape', 'sheath', 'leg-negative', 'leg-positive', 'sword', 'dagger', 'shield'];
       if (required.some((name) => !scene.getObjectByName(name))) throw new Error('Incomplete knight model');

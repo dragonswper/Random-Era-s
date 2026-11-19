@@ -139,7 +139,9 @@ function capturePointer() {
   });
 }
 
-function openError(message) {
+function openError(message, webgl = false) {
+  element('error-dialog').dataset.webgl = String(webgl);
+  element('webgl-help').hidden = !webgl;
   element('error-message').textContent = message;
   modal(element('error-dialog'));
 }
@@ -182,7 +184,7 @@ async function startMatch(mode, { worldSeed = newSeed(), arenaWeapon = weaponSel
     match.player.name = online && networkRole === 'guest' ? peerName : settings.playerName;
     if (online) remoteActor().heraldry = peerHeraldry;
     if (online) match.rival.name = networkRole === 'guest' ? settings.playerName : peerName;
-    const [, kit] = await Promise.race([
+    const [avatar, kit] = await Promise.race([
       Promise.all([armor, mapKit]), new Promise((resolve) => setTimeout(() => resolve([]), 3200)),
     ]);
     if (online && (network !== session || session?.status !== 'connected')) {
@@ -200,6 +202,7 @@ async function startMatch(mode, { worldSeed = newSeed(), arenaWeapon = weaponSel
     aimY = 0.15;
     notice = '';
     noticeUntil = 0;
+    if (!avatar || !kit) flash('Some models are still loading. Simple shapes will fill in for now.');
     hudAt = 0;
     lastInventory = null;
     networkStepAt = 0;
@@ -223,9 +226,10 @@ async function startMatch(mode, { worldSeed = newSeed(), arenaWeapon = weaponSel
   } catch (error) {
     console.error(error);
     returnToMenu();
-    openError(/webgl/i.test(error?.message ?? '')
+    const webgl = /webgl/i.test(error?.message ?? '');
+    openError(webgl
       ? 'This game needs WebGL 2. Check hardware acceleration or try a current desktop browser.'
-      : 'The world could not load. Try starting the match again.');
+      : 'The world could not load. Try starting the match again.', webgl);
     return false;
   } finally {
     loading?.done();
@@ -1072,7 +1076,7 @@ controlsDialog.addEventListener('close', () => { if (swipeTester.isCaptured()) d
 const ui = createInterface(store, { onStart: startMatch, onSettings: applySettings, onExport: exportTerrain, onCopySeed: copyWorldLink });
 applySettings('master');
 document.addEventListener('click', (event) => {
-  if (!event.target.closest('#menu button')) return;
+  if (!event.target.closest?.('#menu button')) return;
   swingAudio.unlock();
   swingAudio.landscape(settings.theme, settings.master * settings.music, 0, false);
   swingAudio.paper();
