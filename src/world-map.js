@@ -47,6 +47,11 @@ export function paintWorldMap(canvas, world, overlay = 'biome', { markers = true
       if (overlay !== 'height' && overlay !== 'slope') {
         const strength = route * (overlay === 'paths' ? .89 : .37);
         c = water ? wet[channel] : c * (1 - strength) + track[channel] * strength;
+        if (overlay === 'biome') {
+          const paper = [215, 188, 139][channel];
+          const ink = water ? wet[channel] : c * (route > .6 ? .63 : .86);
+          c = paper * .67 + ink * .33 + (Math.sin(col * 11.7 + row * 8.3) + 1) * 2.3;
+        }
       }
       picture.data[at + channel] = c;
     }
@@ -72,6 +77,12 @@ export function paintWorldMap(canvas, world, overlay = 'biome', { markers = true
     target.closePath();
     target.fill();
     target.stroke();
+    if (overlay === 'biome' && canvasWidth > 240) {
+      target.font = `${Math.max(13, Math.round(canvasWidth / 24))}px Caveat, cursive`;
+      target.textAlign = 'center';
+      target.fillStyle = '#453121';
+      target.fillText(fort.region.name, x, z + size + 13, canvasWidth / 2 - 10);
+    }
     if (overlay === 'cores') target.strokeRect(x - size * 2, z - size * 2, size * 4, size * 4);
   }
 }

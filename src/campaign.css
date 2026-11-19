@@ -104,7 +104,8 @@
 .home-right { display: grid; gap: clamp(21px, 4.1vw, 58px); align-content: start; padding-top: clamp(35px, 5.5vw, 88px); }
 .parchment {
   position: relative; padding: clamp(20px, 3vw, 40px);
-  background: linear-gradient(128deg, rgb(255 247 213 / .22), transparent 78%), var(--era-paper, var(--campaign-paper));
+  background-color: var(--era-paper, var(--campaign-paper));
+  background-image: linear-gradient(rgb(247 228 182 / .76), rgb(241 224 179 / .75)), url('/parchment.webp');
   color: #292017; border-radius: var(--campaign-radius); box-shadow: var(--campaign-shadow); color-scheme: light;
 }
 .daily-card { transform: rotate(1.12deg); }

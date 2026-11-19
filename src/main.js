@@ -1,5 +1,6 @@
 import './style.css';
 import './campaign.css';
+import { EraWeather } from './era-dressing.js';
 import { createWorld, worldSettings } from './world.js';
 import { prepareWorld } from './world-loader.js';
 import { paintWorldMap } from './world-map.js';
@@ -58,6 +59,7 @@ let impactUntil = 0;
 let impactCaption = '';
 let eventSequence = 0;
 let heardEvent = 0;
+let lastRegion;
 const recentImpacts = [];
 
 let match;
@@ -194,6 +196,7 @@ async function startMatch(mode, { worldSeed = newSeed(), arenaWeapon = weaponSel
     networkStepAt = 0;
     snapshotAt = performance.now();
     lastSwoosh = 0;
+    lastRegion = localActor().regionId;
     impacts.length = recentImpacts.length = 0;
     impactKick = impactUntil = eventSequence = heardEvent = 0;
     accumulated = 0;
@@ -563,6 +566,10 @@ function updateHud(now) {
   const arena = world.mode === 'arena';
   const training = world.mode === 'training';
   const region = world.regionAt(player.x, player.z);
+  if (world.mode === 'frontier' && lastRegion !== region.id) {
+    lastRegion = region.id;
+    flash(`${region.name} · ${EraWeather[region.id].note}`, now);
+  }
   const startingRegion = world.regions.find(({ id }) => id === player.regionId);
   setText('hud-mode', training ? 'TRAINING' : arena ? 'ARENAS · 1V1' : 'FRONTIER');
   setText('hud-region', training ? 'Training Yard' : arena ? 'The Pit' : region.name);

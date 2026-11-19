@@ -25,7 +25,7 @@ function armNodes(model, side) {
 }
 
 export function loadKnight() {
-  knightRequest ??= new GLTFLoader().loadAsync(`${import.meta.env.BASE_URL}knight.glb?rig=2`)
+  knightRequest ??= new GLTFLoader().loadAsync(`${import.meta.env.BASE_URL}knight.glb?rig=3`)
     .then(({ scene }) => {
       const required = ['body', 'helm', 'cape', 'sheath', 'leg-negative', 'leg-positive', 'sword', 'dagger', 'shield'];
       if (required.some((name) => !scene.getObjectByName(name))) throw new Error('Incomplete knight model');

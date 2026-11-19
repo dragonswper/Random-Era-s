@@ -3,6 +3,9 @@ import { AttackPhase, isSwinging } from './combat.js';
 import { bindKnightArm, limitKnightGrip, loadKnight, poseKnightGrip } from './knight.js';
 import { createTerrainView } from './terrain-view.js';
 import { WorldTuning } from './world.js';
+import { EraWeather, eraDressing } from './era-dressing.js';
+import { foliageWind } from './map-kit.js';
+import { loadWeaponArt } from './weapon-art.js';
 import { getWeapon } from './simulation.js';
 
 const UP = new THREE.Vector3(0, 1, 0);
@@ -353,6 +356,24 @@ function scenery(world, geometries, shadowMaterial, mapKit) {
     }
   }
 
+  const fires = [];
+  for (const prop of eraDressing(world)) {
+    const { use, y } = propBuilder(prop);
+    const { region, type, scale } = prop;
+    const bridge = type.endsWith('_bridge_a');
+    const fire = type.endsWith('_fire_a');
+    const material = { main: color(region.stone).lerp(WHITE, .44), bark: color('#82674c'), grass: color(region.accent) };
+    if (use(type, material, bridge ? 2.65 : (fire ? .87 : 2.15) * scale,
+      bridge ? 0.75 : (fire ? .28 : 2.50) * scale, bridge ? 5.2 : (fire ? .85 : 1.46) * scale) && fire) {
+      const flame = meshPart(group, geometries.jewel, luminous('#ed9e57'), prop.x, y + .29, prop.z, .18, .35, .18);
+      const sparks = meshPart(group, geometries.jewel, luminous('#f8c079'), prop.x + .06, y + .4, prop.z, .075, .19, .075);
+      const smoke = meshPart(group, geometries.boulder, new THREE.MeshBasicMaterial({
+        color: '#a19b8a', transparent: true, opacity: .13, depthWrite: false,
+      }), prop.x, y + 1.18, prop.z, .42, 1.45, .41);
+      fires.push({ flame, sparks, smoke, y });
+    }
+  }
+
   for (const { kind, entries, tile } of instances.values()) {
     const asset = typeof kind === 'string' ? null : kind;
     const material = asset?.material ?? new THREE.MeshLambertMaterial({ side: kind === 'treeCard' ? THREE.DoubleSide : THREE.FrontSide });
@@ -386,7 +407,13 @@ function scenery(world, geometries, shadowMaterial, mapKit) {
 
   return {
     group,
-    update(player, quality) {
+    update(player, quality, time, reducedMotion) {
+      for (const [index, fire] of fires.entries()) {
+        const wave = reducedMotion ? .5 : .5 + Math.sin(time * 12.3 + index * 7) * .33 + Math.sin(time * 17.1) * .14;
+        fire.flame.scale.y = .27 + wave * .18;
+        fire.sparks.position.y = fire.y + .31 + wave * .28;
+        fire.smoke.position.y = fire.y + 1.14 + wave * .22;
+      }
       const near = { low: 21, medium: 34, high: 49, ultra: 72 }[quality] ?? 34;
       for (const { batch, tile, distant } of treeBatches) {
         const gap = Math.hypot(player.x - tile.x, player.z - tile.z);
@@ -808,8 +835,8 @@ function drawTrail(rig, weapon, active, progress, direction) {
   const positions = rig.trails.geometry.getAttribute('position');
   const start = Math.max(0, progress - 0.29);
   const axe = weapon.id === 'iron-axe';
-  const tipLength = rig.weaponTip ?? ({ club: 1.41, mace: 1.45, spear: 2.16, curved: 1.34 }[weapon.form] ?? (axe ? 1.43 : 0.24 + swordLength(weapon) * 1.045));
-  const tipSide = axe ? 0.515 : 0;
+  const tipLength = rig.weaponTip?.y ?? ({ club: 1.41, mace: 1.45, spear: 2.16, curved: 1.34 }[weapon.form] ?? (axe ? 1.43 : 0.24 + swordLength(weapon) * 1.045));
+  const tipSide = rig.weaponTip?.x ?? (axe ? 0.515 : 0);
 
   rig.trails.material.opacity = (1 - Math.abs(0.51 - progress) * 1.72) * 0.48;
   rig.trails.material.color.set(weapon.color);
@@ -872,7 +899,7 @@ function makeCoreRig(core, region, geometries) {
   return { root, crystal, crystalCover, marker, ring, pennon, healthFg, health: core.health };
 }
 
-function makePickupRig(pickup, world, geometries, getWeapon) {
+function makePickupRig(pickup, world, geometries, art) {
   const root = new THREE.Group();
   root.position.set(pickup.x, world.height(pickup.x, pickup.z), pickup.z);
   const hue = pickup.item === 'weapon' ? getWeapon(pickup.weaponId).color : pickup.item === 'medkit' ? '#e99691' : '#8ed4b2';
@@ -882,7 +909,8 @@ function makePickupRig(pickup, world, geometries, getWeapon) {
   const orb = new THREE.Group();
   root.add(orb);
   if (pickup.item === 'weapon') {
-    makeWeapon(orb, geometries, getWeapon(pickup.weaponId));
+    if (art) orb.add(art.root.clone(true));
+    else makeWeapon(orb, geometries, getWeapon(pickup.weaponId));
     orb.scale.setScalar(0.49);
   } else meshPart(orb, geometries.jewel, luminous(hue), 0, 0, 0, 0.205, 0.28, 0.205);
   const ring = new THREE.Mesh(new THREE.RingGeometry(0.41, 0.45, 24), new THREE.MeshBasicMaterial({ color: hue, transparent: true, side: THREE.DoubleSide, depthWrite: false, opacity: 0.61 }));
@@ -1013,6 +1041,20 @@ export function createRenderer(canvas) {
   const shadowMaterial = new THREE.MeshBasicMaterial({ color: '#161f1c', map: shadowTexture, opacity: 0.27, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2 });
   const sharedGeometries = new Set(Object.values(geometries));
   const sharedMaterials = new Set([shadowMaterial]);
+  let weaponArt;
+  loadWeaponArt().then((models) => {
+    weaponArt = models;
+    for (const { root } of models.values()) root.traverse((part) => {
+      if (part.geometry) sharedGeometries.add(part.geometry);
+      if (part.material) sharedMaterials.add(part.material);
+    });
+    for (const rig of actors.values()) rig.weaponId = null;
+    for (const [id, pickup] of pickups) {
+      pickup.root.removeFromParent();
+      cleanGroup(pickup.root, sharedGeometries, sharedMaterials);
+      pickups.delete(id);
+    }
+  }).catch((error) => console.warn('Weapon models unavailable', error));
   let knightModel;
   loadKnight().then((model) => {
     knightModel = model;
@@ -1039,6 +1081,53 @@ export function createRenderer(canvas) {
   let world = null;
   let terrainView;
   let sceneryView;
+  const haze = new THREE.Color();
+  const zenith = new THREE.Color();
+  const weatherTint = new THREE.Color();
+  const nightInk = color('#282633');
+  const points = new Float32Array(84 * 3);
+  const moteGeometry = new THREE.BufferGeometry();
+  moteGeometry.setAttribute('position', new THREE.BufferAttribute(points, 3).setUsage(THREE.DynamicDrawUsage));
+  const motes = new THREE.Points(moteGeometry, new THREE.PointsMaterial({ size: .075, transparent: true, opacity: .48, depthWrite: false }));
+  motes.frustumCulled = false;
+  scene.add(motes);
+
+  function atmosphere(player, time, reducedMotion) {
+    foliageWind.value = reducedMotion ? 0 : Math.sin(time * 1.7) * .074;
+    const weights = world.biomeWeights(player.x, player.z);
+    haze.setRGB(0, 0, 0);
+    zenith.setRGB(0, 0, 0);
+    let far = 0;
+    for (const [index, region] of world.regions.entries()) {
+      const weather = EraWeather[region.id];
+      const weight = weights[index];
+      haze.add(weatherTint.set(weather.haze).multiplyScalar(weight));
+      zenith.add(weatherTint.set(weather.sky).multiplyScalar(weight));
+      far += weather.far * weight;
+    }
+    const day = world.mode === 'frontier' ? .5 + .5 * Math.cos(time / 72) : .8;
+    scene.fog.color.copy(haze.lerp(nightInk, (1 - day) * .70));
+    sky.material.uniforms.haze.value.copy(haze);
+    sky.material.uniforms.zenith.value.copy(zenith.lerp(nightInk, (1 - day) * .70));
+    scene.fog.far = far * (quality === 'low' ? .66 : quality === 'medium' ? .83 : 1);
+    light.intensity = .54 + day * 1.21;
+    light.position.set(-22 + time % 310 * .134, 12 + day * 15, 16);
+    ambient.intensity = .85 + day * .46;
+    motes.visible = !reducedMotion && world.mode === 'frontier' && quality !== 'low';
+    if (!motes.visible) return;
+    const weather = EraWeather[world.regionAt(player.x, player.z).id];
+    motes.material.color.set(weather.drift);
+    const anchorX = Math.floor(player.x / 12) * 12;
+    const anchorZ = Math.floor(player.z / 12) * 12;
+    const altitude = world.height(player.x, player.z);
+    for (let i = 0; i < points.length / 3; i++) {
+      points[i * 3] = anchorX - 14 + (i * 7.29 + time * .85) % 30;
+      points[i * 3 + 1] = altitude - .4 + (i * 3.11 + 8 - time % 8) % 8;
+      points[i * 3 + 2] = anchorZ - 14 + (i * 11.17 + time * .39) % 30;
+    }
+    moteGeometry.attributes.position.needsUpdate = true;
+  }
+
   let quality = 'medium';
   let detailedChunks = 0;
   let blockers = [];
@@ -1191,7 +1280,8 @@ export function createRenderer(canvas) {
     if (!player) return;
     const ownWeapon = getWeapon(player.weaponId);
     detailedChunks = terrainView.update(player, quality);
-    sceneryView.update(player, quality);
+    sceneryView.update(player, quality, game.time, view.reducedMotion);
+    atmosphere(player, game.time, view.reducedMotion);
     positionCamera(player, view, dt, ownWeapon);
 
     for (const member of members) {
@@ -1218,11 +1308,15 @@ export function createRenderer(canvas) {
         cleanGroup(rig.weapons, sharedGeometries, sharedMaterials);
         const modelPart = weapon.id === 'steel-longsword' ? 'sword' : weapon.id === 'knight-dagger' ? 'dagger' : null;
         rig.weaponTip = undefined;
-        if (rig.knight && modelPart) {
+        const art = weaponArt?.get(weapon.id);
+        if (art && !member.drill) {
+          rig.weapons.add(art.root.clone(true));
+          rig.weaponTip = art.tip;
+        } else if (rig.knight && modelPart) {
           const held = knightModel.getObjectByName(modelPart).clone(true);
           held.position.set(0, 0, 0);
           rig.weapons.add(held);
-          rig.weaponTip = held.userData.tipY;
+          rig.weaponTip = { x: 0, y: held.userData.tipY };
         } else if (!member.drill) makeWeapon(rig.weapons, geometries, weapon);
         if (rig.knight) rig.knight.sheathedDagger.visible = weapon.id !== 'knight-dagger';
         rig.weaponId = weapon.id;
@@ -1278,7 +1372,7 @@ export function createRenderer(canvas) {
       if (!entry.available && !pickups.has(entry.id)) continue;
       let rig = pickups.get(entry.id);
       if (!rig) {
-        rig = makePickupRig(entry, world, geometries, getWeapon);
+        rig = makePickupRig(entry, world, geometries, weaponArt?.get(entry.weaponId));
         actorsRoot.add(rig.root);
         pickups.set(entry.id, rig);
       }
@@ -1307,6 +1401,8 @@ export function createRenderer(canvas) {
     setViewModel(null);
     cleanGroup(sceneryRoot, sharedGeometries, sharedMaterials);
     cleanGroup(actorsRoot, sharedGeometries, sharedMaterials);
+    moteGeometry.dispose();
+    motes.material.dispose();
     sky.geometry.dispose();
     sky.material.dispose();
     particles.mesh.material.dispose();
@@ -1319,6 +1415,7 @@ export function createRenderer(canvas) {
 
   function setQuality(preset, resolutionScale = 1) {
     quality = preset;
+    shadowMaterial.opacity = preset === 'low' ? .21 : .35;
     const limit = { low: .82, medium: 1.18, high: 1.5, ultra: 1.9 }[preset] ?? 1.18;
     graphics.setPixelRatio(Math.min(globalThis.devicePixelRatio || 1, limit) * resolutionScale);
     lastWidth = 0;

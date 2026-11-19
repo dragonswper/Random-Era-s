@@ -2,19 +2,35 @@ import { MeshLambertMaterial } from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
 let request;
+export const foliageWind = { value: 0 };
+
+function makeFinish(mesh, animated) {
+  const material = new MeshLambertMaterial({
+    map: mesh.material.map, side: mesh.material.side, vertexColors: mesh.geometry.hasAttribute('color'),
+  });
+  if (animated) material.onBeforeCompile = (program) => {
+    program.uniforms.foliageWind = foliageWind;
+    program.vertexShader = 'uniform float foliageWind;\n' + program.vertexShader.replace('#include <begin_vertex>',
+      '#include <begin_vertex>\ntransformed.x += transformed.y * transformed.y * foliageWind;');
+  };
+  return material;
+}
+
 
 export function loadMapKit() {
-  request ??= new GLTFLoader().loadAsync(`${import.meta.env.BASE_URL}map-kit.glb`)
-    .then(({ scene }) => {
+  const loader = new GLTFLoader();
+  request ??= Promise.all(['map-kit', 'era-props'].map((name) => loader.loadAsync(`${import.meta.env.BASE_URL}${name}.glb?art=1`)))
+    .then((groups) => {
       const kit = new Map();
       const finishes = new Map();
-      for (const variant of scene.children) {
+      for (const variant of groups.flatMap(({ scene }) => scene.children)) {
         const parts = [];
         variant.traverse((mesh) => {
           if (!mesh.isMesh) return;
           const source = mesh.material;
-          const finish = `${source.map?.uuid ?? 'plain'}/${source.side}`;
-          if (!finishes.has(finish)) finishes.set(finish, new MeshLambertMaterial({ map: source.map, side: source.side }));
+          const animated = variant.name === 'grass' || variant.name === 'bush';
+          const finish = `${source.map?.uuid ?? 'plain'}/${source.side}/${mesh.geometry.hasAttribute('color')}/${animated}`;
+          if (!finishes.has(finish)) finishes.set(finish, makeFinish(mesh, animated));
           const name = source.name.toLowerCase();
           const colorSlot = name.includes('bark') ? 'bark' : name.startsWith('grass') ? 'grass' : 'main';
           // Each mesh is packed in unit bounds with its bottom at Y = 0.
