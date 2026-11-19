@@ -31,4 +31,4 @@ Unreal importers can transpose axes to Z up and scale positions from meters to c
 
 ## Native combat direction
 
-The current first-person view animates rigid pieces of the supplied knight with directional gestures and a shield pose. An active-ragdoll port can feed those same swipe vectors into hand IK, weapon inertia and body balance, then add grip and thrust states with physics contact events. The physics brief is the target for that phase. Browser damage currently uses game reach, timing, guard and stamina rules.
+`public/knight.glb` opens as an assembled knight with named shoulder, elbow, wrist, and grip nodes. Both views use the same fixed-length arm chains. The renderer solves the elbow position for each hand target and keeps the gear and swing trail attached to the grips. An active-ragdoll port can feed the swipe vectors into hand IK, weapon inertia and body balance, then add grip and thrust states with physics contact events. The physics brief is the target for that phase. Browser damage currently uses game reach, timing, guard and stamina rules.

@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { AttackPhase, isSwinging } from './combat.js';
-import { loadKnight } from './knight.js';
+import { bindKnightArm, limitKnightGrip, loadKnight, poseKnightGrip } from './knight.js';
 import { createTerrainView } from './terrain-view.js';
 import { WorldTuning } from './world.js';
 import { getWeapon } from './simulation.js';
@@ -10,6 +10,9 @@ const WHITE = new THREE.Color(0xffffff);
 const TAU = Math.PI * 2;
 const TRAIL_SEGMENTS = 24;
 const VIEW_MODEL_SCALE = 0.64;
+const VIEW_MODEL_TILT = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), 0.40);
+const VIEW_MODEL_YAW = new THREE.Quaternion().setFromAxisAngle(UP, Math.PI);
+const KNIGHT_VIEW_ROTATION = VIEW_MODEL_TILT.clone().multiply(VIEW_MODEL_YAW);
 const clamp = THREE.MathUtils.clamp;
 const mixes = THREE.MathUtils.lerp;
 
@@ -595,36 +598,41 @@ function swordLength(weapon) {
   return weapon.id === 'plasma-blade' ? 1.37 : 1.05;
 }
 
-function mountKnight(rig, model) {
+function mountKnight(rig, model, geometries) {
+  const avatar = model.clone(true);
   const piece = (name, parent) => {
-    const group = model.getObjectByName(name).clone(true);
+    const group = avatar.getObjectByName(name);
     parent.add(group);
     return group;
   };
   for (const part of rig.hideInFirstPerson) part.visible = false;
+  for (const { top, bottom, hand } of rig.arms) top.visible = bottom.visible = hand.visible = false;
   const armor = piece('body', rig.body);
   const helmet = piece('helm', rig.body);
   const sheath = piece('sheath', rig.body);
-  sheath.position.set(0.28, 1.03, -0.14);
-  sheath.rotation.z = 2.85;
   const cape = piece('cape', rig.body);
-  cape.position.set(0, 1.58, -0.115);
   rig.cape = cape;
+  rig.legs = [piece('leg-negative', rig.body), piece('leg-positive', rig.body)];
 
-  for (const [index, arm] of rig.arms.entries()) {
-    const side = index === 0 ? 'positive' : 'negative';
-    for (const part of [arm.top, arm.bottom, arm.hand]) part.removeFromParent();
-    arm.top = piece(`upper-${side}`, rig.limbs);
-    arm.bottom = piece(`forearm-${side}`, rig.limbs);
-    arm.hand = piece(`hand-${side}`, rig.limbs);
+  const right = bindKnightArm(avatar, 'negative');
+  const left = bindKnightArm(avatar, 'positive');
+  const lining = lambert('#24313c');
+  for (const { forearm, hand, lowerAxis, lowerLength } of [right, left]) {
+    // The supplied plates are hollow. Sleeves cover the joint gaps when the wrists bend.
+    const sleeve = meshPart(forearm, geometries.column, lining, 0, 0, 0, 0.105, lowerLength + 0.075, 0.105);
+    sleeve.position.copy(hand.position).multiplyScalar(0.5);
+    sleeve.quaternion.setFromUnitVectors(UP, lowerAxis);
+    const cuff = meshPart(hand, geometries.column, lining, 0, 0, 0, 0.115, 0.21, 0.115);
+    cuff.position.copy(lowerAxis).multiplyScalar(-0.06);
+    cuff.quaternion.copy(sleeve.quaternion);
   }
-  for (const [index, leg] of rig.legs.entries()) {
-    leg.clear();
-    piece(index === 0 ? 'leg-negative' : 'leg-positive', leg);
-  }
-  rig.shield = piece('shield', rig.limbs);
+  avatar.getObjectByName('sword').removeFromParent();
+  rig.limbs.add(right.upper, left.upper);
+  right.grip.add(rig.weapons);
+  rig.weapons.position.set(0, 0, 0);
+  rig.weapons.quaternion.identity();
   rig.hideInFirstPerson = [armor, helmet, sheath, cape, ...rig.legs];
-  rig.knight = true;
+  rig.knight = { right, left, sheathedDagger: sheath.getObjectByName('dagger'), guard: 0 };
   rig.weaponId = null;
 }
 
@@ -658,6 +666,10 @@ const shoulderPoint = new THREE.Vector3();
 const elbowPoint = new THREE.Vector3();
 const handPoint = new THREE.Vector3();
 const bladeDirection = new THREE.Vector3();
+const bladeRotation = new THREE.Quaternion();
+const shieldPoint = new THREE.Vector3();
+const shieldAngles = new THREE.Euler();
+const shieldRotation = new THREE.Quaternion();
 
 function positionLimb(mesh, a, b, width) {
   joint.subVectors(b, a);
@@ -683,14 +695,18 @@ function poseActor(rig, actor, world, weapon, dt, firstPerson) {
     rig.root.rotation.y += deltaYaw * blend;
   }
 
+  const { knight } = rig;
   const speed = clamp((actor.speed || 0) / 7, 0, 1.25);
   rig.stepPhase += dt * (2.5 + speed * 9.5);
-  const stride = Math.sin(rig.stepPhase) * speed * 0.59;
+  const stride = Math.sin(rig.stepPhase) * speed * (knight ? 0.44 : 0.59);
   const bob = Math.abs(Math.cos(rig.stepPhase)) * Math.min(0.085, speed * 0.09);
   rig.legs[0].rotation.x = stride;
   rig.legs[1].rotation.x = -stride;
-  rig.body.position.y = bob;
-  rig.cape.rotation.x = -speed * 0.42 - stride * 0.15;
+  // The boots swing about the hips. Offset the body by the lowest sole's change in height.
+  rig.body.position.y = knight
+    ? rig.legs[0].position.y * (Math.cos(stride) - 1) + 0.24 * Math.abs(Math.sin(stride))
+    : bob;
+  rig.cape.rotation.x = knight ? speed * 0.27 + stride * 0.12 : -speed * 0.42 - stride * 0.15;
   rig.root.visible = actor.alive !== false && actor.health > 0;
 
   const { phase, elapsed, gesture: swipe } = actor.combat;
@@ -698,10 +714,10 @@ function poseActor(rig, actor, world, weapon, dt, firstPerson) {
   const swingProgress = active ? clamp(elapsed / weapon.swing, 0, 1) : Number(phase === AttackPhase.RECOVERY);
   const aimX = actor.aimX || 0;
   const aimY = actor.aimY || 0;
-  let handX = 0.48 + aimX * 0.22;
-  let handY = 1.25 + aimY * 0.36;
-  let handZ = 0.36 + stride * 0.055;
-  bladeDirection.set(aimX * 0.56 + 0.17, 0.85 + aimY * 0.55, 0.48);
+  let handX = knight ? 0.355 + aimX * 0.125 : 0.48 + aimX * 0.22;
+  let handY = 1.25 + aimY * (knight ? 0.27 : 0.36);
+  let handZ = (knight ? 0.46 : 0.36) + stride * 0.055;
+  bladeDirection.set(knight ? aimX * 0.41 - 0.14 : aimX * 0.56 + 0.17, 0.85 + aimY * 0.55, knight ? 0.56 : 0.48);
   if (isSwinging(actor.combat)) {
     gesture.set(swipe.x, swipe.y);
     const weight = phase === AttackPhase.WINDUP ? elapsed / weapon.windup
@@ -718,35 +734,41 @@ function poseActor(rig, actor, world, weapon, dt, firstPerson) {
     bladeDirection.set(-0.82, 0.54 + aimY * 0.25, 0.08);
   }
 
-  for (let index = 0; index < 2; index += 1) {
-    const arm = rig.arms[index];
-    const side = index ? 1 : -1;
-    shoulderPoint.set(side * 0.375, 1.55, 0.012);
-    if (index) {
-      elbowPoint.set(mixes(shoulderPoint.x, handX, 0.51) + 0.125, mixes(shoulderPoint.y, handY, 0.53) - 0.12, handZ * 0.39 - 0.045);
-      handPoint.set(handX, handY, handZ);
-    } else if (actor.guarding) {
-      elbowPoint.set(-0.53, 1.35, 0.22);
-      handPoint.set(-0.28, 1.62 + aimY * 0.14, 0.49);
-    } else {
-      elbowPoint.set(-0.466, 1.21 + speed * 0.1, -0.03 - stride * 0.22);
-      handPoint.set(-0.433, 0.96 + speed * 0.21, 0.08 - stride * 0.38);
-    }
-    shoulderPoint.x *= -1;
-    elbowPoint.x *= -1;
-    handPoint.x *= -1;
-    positionLimb(arm.top, shoulderPoint, elbowPoint, 0.183);
-    positionLimb(arm.bottom, elbowPoint, handPoint, 0.144);
-    arm.hand.position.copy(handPoint);
-  }
-
-  rig.weapons.position.set(-handX, handY, handZ);
   bladeDirection.x *= -1;
-  rig.weapons.quaternion.setFromUnitVectors(UP, bladeDirection.normalize());
-  if (rig.shield) {
-    const guard = actor.guarding;
-    rig.shield.position.set(guard ? 0.29 : 0.51, (guard ? 1.38 : 1.02) + (guard ? aimY * 0.15 : stride * 0.035), guard ? 0.62 : 0.33);
-    rig.shield.rotation.set(guard ? -0.16 : 0.16, guard ? -0.1 : -0.65, guard ? -0.18 : -0.24);
+  bladeRotation.setFromUnitVectors(UP, bladeDirection.normalize());
+  if (knight) {
+    poseKnightGrip(knight.right, handPoint.set(-handX, handY, handZ), bladeRotation);
+    knight.guard = THREE.MathUtils.damp(knight.guard, Number(actor.guarding), 22, dt);
+    const raised = knight.guard;
+    shieldPoint.set(mixes(0.41, 0.26, raised),
+      mixes(1.17 + speed * 0.10, 1.41 + aimY * 0.12, raised),
+      mixes(0.34 - stride * 0.19, 0.55, raised));
+    shieldAngles.set(mixes(0.13, -0.16, raised), mixes(-0.60, -0.1, raised), -0.16);
+    poseKnightGrip(knight.left, shieldPoint, shieldRotation.setFromEuler(shieldAngles));
+  } else {
+    for (let index = 0; index < 2; index += 1) {
+      const arm = rig.arms[index];
+      const side = index ? 1 : -1;
+      shoulderPoint.set(side * 0.375, 1.55, 0.012);
+      if (index) {
+        elbowPoint.set(mixes(shoulderPoint.x, handX, 0.51) + 0.125, mixes(shoulderPoint.y, handY, 0.53) - 0.12, handZ * 0.39 - 0.045);
+        handPoint.set(handX, handY, handZ);
+      } else if (actor.guarding) {
+        elbowPoint.set(-0.53, 1.35, 0.22);
+        handPoint.set(-0.28, 1.62 + aimY * 0.14, 0.49);
+      } else {
+        elbowPoint.set(-0.466, 1.21 + speed * 0.1, -0.03 - stride * 0.22);
+        handPoint.set(-0.433, 0.96 + speed * 0.21, 0.08 - stride * 0.38);
+      }
+      shoulderPoint.x *= -1;
+      elbowPoint.x *= -1;
+      handPoint.x *= -1;
+      positionLimb(arm.top, shoulderPoint, elbowPoint, 0.183);
+      positionLimb(arm.bottom, elbowPoint, handPoint, 0.144);
+      arm.hand.position.copy(handPoint);
+    }
+    rig.weapons.position.set(-handX, handY, handZ);
+    rig.weapons.quaternion.copy(bladeRotation);
   }
   rig.hideInFirstPerson.forEach((part) => { part.visible = !firstPerson; });
 
@@ -765,8 +787,7 @@ function drawTrail(rig, weapon, active, progress, direction) {
   const positions = rig.trails.geometry.getAttribute('position');
   const start = Math.max(0, progress - 0.29);
   const axe = weapon.id === 'iron-axe';
-  const tipLength = axe ? 1.43 : rig.knight && weapon.id === 'steel-longsword' ? 1.92
-    : rig.knight && weapon.id === 'knight-dagger' ? 0.56 : 0.24 + swordLength(weapon) * 1.045;
+  const tipLength = rig.weaponTip ?? (axe ? 1.43 : 0.24 + swordLength(weapon) * 1.045);
   const tipSide = axe ? 0.515 : 0;
 
   rig.trails.material.opacity = (1 - Math.abs(0.51 - progress) * 1.72) * 0.48;
@@ -774,12 +795,14 @@ function drawTrail(rig, weapon, active, progress, direction) {
   for (let strip = 0; strip <= TRAIL_SEGMENTS; strip += 1) {
     const amount = mixes(start, progress, strip / TRAIL_SEGMENTS);
     sampleSwing(amount, direction, trailWrist, trailBlade);
+    trailWrist.x *= -1;
     trailBlade.x *= -1;
     trailRotation.setFromUnitVectors(UP, trailBlade.normalize());
+    if (rig.knight) limitKnightGrip(rig.knight.right, trailWrist, trailRotation);
     for (let edge = 0; edge < 2; edge += 1) {
       trailTip.set(tipSide, tipLength - edge * 0.17, 0).applyQuaternion(trailRotation);
       positions.setXYZ(strip * 2 + edge,
-        -trailWrist.x + trailTip.x,
+        trailWrist.x + trailTip.x,
         trailWrist.y + trailTip.y,
         trailWrist.z + trailTip.z,
       );
@@ -957,7 +980,7 @@ export function createRenderer(canvas) {
   camera.position.set(0, 27, -20);
   camera.lookAt(0, 0, 0);
   const viewModelScene = new THREE.Scene();
-  const viewModelCamera = new THREE.PerspectiveCamera(64, 16 / 9, 0.04, 8);
+  const viewModelCamera = new THREE.PerspectiveCamera(74, 16 / 9, 0.04, 8);
   viewModelScene.add(light.clone(), ambient.clone());
   const geometries = createGeometries();
   const shadowTexture = softShadowTexture();
@@ -1007,14 +1030,13 @@ export function createRenderer(canvas) {
       const { body, limbs } = viewModelRig;
       body.add(limbs);
       limbs.position.set(0, 0, 0);
-      limbs.rotation.y = 0;
+      limbs.quaternion.identity();
       limbs.scale.setScalar(1);
     }
     viewModelRig = rig;
     if (rig) {
       // Both views share the gesture pose and trail. The camera-space arms stay clear of terrain.
       viewModelScene.add(rig.limbs);
-      rig.limbs.rotation.y = Math.PI;
       rig.limbs.scale.setScalar(VIEW_MODEL_SCALE);
     }
   }
@@ -1161,12 +1183,18 @@ export function createRenderer(canvas) {
       }
       const own = member.id === player.id;
       const weapon = own ? ownWeapon : getWeapon(member.weaponId);
-      if (member.avatar === 'knight' && knightModel && !rig.knight) mountKnight(rig, knightModel);
+      if (member.avatar === 'knight' && knightModel && !rig.knight) mountKnight(rig, knightModel, geometries);
       if (rig.weaponId !== weapon.id) {
         cleanGroup(rig.weapons, sharedGeometries, sharedMaterials);
         const modelPart = weapon.id === 'steel-longsword' ? 'sword' : weapon.id === 'knight-dagger' ? 'dagger' : null;
-        if (rig.knight && modelPart) rig.weapons.add(knightModel.getObjectByName(modelPart).clone(true));
-        else if (!member.drill) makeWeapon(rig.weapons, geometries, weapon);
+        rig.weaponTip = undefined;
+        if (rig.knight && modelPart) {
+          const held = knightModel.getObjectByName(modelPart).clone(true);
+          held.position.set(0, 0, 0);
+          rig.weapons.add(held);
+          rig.weaponTip = held.userData.tipY;
+        } else if (!member.drill) makeWeapon(rig.weapons, geometries, weapon);
+        if (rig.knight) rig.knight.sheathedDagger.visible = weapon.id !== 'knight-dagger';
         rig.weaponId = weapon.id;
       }
       if (rig.health !== null && member.health < rig.health) {
@@ -1177,7 +1205,17 @@ export function createRenderer(canvas) {
       const bob = poseActor(rig, member, world, weapon, dt, firstPerson);
       if (own) {
         setViewModel(firstPerson && member.alive ? rig : null);
-        if (viewModelRig) rig.limbs.position.set(-0.05, -1.83 * VIEW_MODEL_SCALE + (view.reducedMotion ? 0 : bob * 0.26), -0.48);
+        if (viewModelRig) {
+          const sway = view.reducedMotion ? 0 : bob * 0.26;
+          if (rig.knight) {
+            // Tilt around the eye and keep the shoulder joints below the resting view.
+            rig.limbs.quaternion.copy(KNIGHT_VIEW_ROTATION);
+            rig.limbs.position.set(-0.05, -1.95 * VIEW_MODEL_SCALE + sway, -0.08).applyQuaternion(VIEW_MODEL_TILT);
+          } else {
+            rig.limbs.quaternion.copy(VIEW_MODEL_YAW);
+            rig.limbs.position.set(-0.05, -1.83 * VIEW_MODEL_SCALE + sway, -0.48);
+          }
+        }
       }
       const gap = Math.hypot(member.x - player.x, member.z - player.z);
       rig.helm.visible = !own && gap < 17;
