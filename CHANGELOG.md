@@ -13,3 +13,10 @@
 - Era landmarks and camps dress the existing terrain. A timber bridge marks a ford, and the world light and haze change over time.
 - The map uses a warm ink palette. Large previews label the strongholds, and Frontier names each region on entry.
 - Asset tests enforce the triangle, texture and download budgets.
+
+## C. Campaign screens
+
+- Loadout has a rotating weapon, an armor cloth choice and a title.
+- Career saves local sessions, hits, knockdowns and longest chains. The match recap shows accuracy, defenses and time.
+- Training has a short optional drill guide. Controls includes a live swipe test, and M opens the Frontier field map.
+- Music and ambience have their own levels. The menu sound and footsteps are synthesized in the browser.

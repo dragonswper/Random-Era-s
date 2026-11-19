@@ -33,9 +33,12 @@ Vite prints the local URL. The production build is in `dist/`.
 | 1–9 | Equip a carried weapon |
 | V | Switch between first and third person in Frontier or Training |
 | Tab | Match status |
+| M | Frontier field map |
 | Escape | Game menu |
 
 Click the game if it needs to capture the mouse. The cursor is hidden while captured, with unadjusted relative movement when supported. Choose **Mouse swipe** or **Left click** under **Settings → Controls → Attack input**. **Settings → Gameplay** exposes swipe thresholds and the solo combo window. Hold the shield just before impact to parry. `CombatTuning` in `src/combat.js` defines the minimum swipe speed and distance, the swipe window, and combo timing. Per-weapon timing lives in `src/simulation.js`.
+
+Career records sessions, hits, knockdowns and longest chains in this browser. The optional Yard guide is under Gameplay Settings.
 
 ## Play with a friend
 

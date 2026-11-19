@@ -1,6 +1,7 @@
 import { REGIONS, worldSettings } from './world.js';
 import { prepareWorld } from './world-loader.js';
 import { paintWorldMap } from './world-map.js';
+import { readCareer } from './career.js';
 import { keyLabel } from './settings.js';
 import { getWeapon } from './simulation.js';
 
@@ -25,9 +26,21 @@ function writeEraOptions(select, first = 'Random') {
   for (const id of ERA_ORDER) select.add(new Option(eraName(id), id));
 }
 
+export function writeLedger(list, entries) {
+  list.replaceChildren(...entries.map(([label, value]) => {
+    const row = document.createElement('div');
+    const title = document.createElement('dt');
+    const data = document.createElement('dd');
+    title.textContent = label;
+    data.textContent = value;
+    row.append(title, data);
+    return row;
+  }));
+}
+
 export function createInterface(store, { onStart, onSettings, onExport, onCopySeed }) {
   const { state } = store;
-  const menus = ['home', 'modes', 'lobby', 'loadout', 'credits'];
+  const menus = ['home', 'modes', 'lobby', 'loadout', 'career', 'credits'];
   const seedInput = element('world-seed');
   const sizeSelect = element('world-size');
   const eraSelect = element('world-era');
@@ -38,6 +51,8 @@ export function createInterface(store, { onStart, onSettings, onExport, onCopySe
   let screen = 'home';
   let keyToBind;
   let previewId = 0;
+  let loadoutView;
+  let previewFrame;
 
   writeEraOptions(eraSelect);
   writeEraOptions(element('arena-era'), 'Random age');
@@ -131,6 +146,28 @@ export function createInterface(store, { onStart, onSettings, onExport, onCopySe
       drawRoster();
       previewCamp().catch(() => announce(null, 'The map preview is unavailable.'));
     }
+    cancelAnimationFrame(previewFrame);
+    if (screen === 'loadout') {
+      loadoutView ??= import('./loadout-view.js').then(({ createLoadoutView }) =>
+        createLoadoutView(element('loadout-preview'), () => state)).catch(() => null);
+      loadoutView.then((draw) => {
+        if (!draw || screen !== 'loadout') return;
+        const render = (time) => {
+          if (screen !== 'loadout' || element('menu').hidden) return;
+          draw(time);
+          previewFrame = requestAnimationFrame(render);
+        };
+        previewFrame = requestAnimationFrame(render);
+      });
+    }
+    if (screen === 'career') {
+      const career = readCareer();
+      const favorite = Object.entries(career.visits).sort((a, b) => b[1] - a[1])[0];
+      writeLedger(element('career-ledger'), [
+        ['Sessions', career.matches], ['Hits landed', career.hits], ['Fighters downed', career.kills],
+        ['Longest chain', career.longestCombo], ['Most played age', favorite[1] ? eraName(favorite[0]) : '—'],
+      ]);
+    }
     scrollTo({ top: 0, behavior: 'instant' });
     if (focus) element(`${next}-screen`).querySelector('button')?.focus({ preventScroll: true });
   }
@@ -203,6 +240,7 @@ export function createInterface(store, { onStart, onSettings, onExport, onCopySe
     for (const button of eraTabs.children) button.setAttribute('aria-pressed', String(button.dataset.era === state.theme));
     for (const name of all('[data-profile-name]')) name.textContent = state.playerName;
     for (const letter of all('[data-profile-letter]')) letter.textContent = state.playerName[0].toUpperCase();
+    element('profile-title').textContent = state.title;
     element('profile-name').value = state.playerName;
     loadout.value = state.weapon;
     const weapon = getWeapon(state.weapon);
@@ -238,6 +276,7 @@ export function createInterface(store, { onStart, onSettings, onExport, onCopySe
 
   for (const button of all('[data-open-settings]')) button.addEventListener('click', () => {
     statuses.textContent = '';
+    if (button.closest('#controls-dialog')) settingsTab('controls');
     if (!settingsDialog.open) settingsDialog.showModal();
   });
   function settingsTab(name) {
@@ -256,7 +295,7 @@ export function createInterface(store, { onStart, onSettings, onExport, onCopySe
       statuses.textContent = '';
       return;
     }
-    if (['Tab', 'KeyV', 'ShiftRight', 'AltLeft', 'AltRight', 'ControlLeft', 'ControlRight', 'MetaLeft', 'MetaRight'].includes(event.code)
+    if (['Tab', 'KeyV', 'KeyM', 'ShiftRight', 'AltLeft', 'AltRight', 'ControlLeft', 'ControlRight', 'MetaLeft', 'MetaRight'].includes(event.code)
       || /^(Digit|F\d)/.test(event.code) || event.ctrlKey || event.metaKey || event.altKey) return;
     event.preventDefault();
     const keys = { ...state.keys };

@@ -12,7 +12,7 @@
     <div id="menu" class="campaign" data-era="ironwood">
       <section id="home-screen" class="campaign-screen campaign-home" aria-labelledby="game-title">
         <header class="campaign-profile">
-          <span><strong data-profile-name>Wanderer</strong><small>Local profile</small></span>
+          <span><strong data-profile-name>Wanderer</strong><small id="profile-title">Wanderer</small></span>
           <button type="button" class="profile-seal" data-go="loadout" aria-label="Open your loadout" data-profile-letter>W</button>
         </header>
         <main class="home-layout">
@@ -25,6 +25,8 @@
               <button type="button" data-go="lobby">Join a lobby</button>
               <button type="button" data-play-training>Training</button>
               <button type="button" data-go="loadout">Loadout</button>
+              <button type="button" data-go="career">Career</button>
+              <button type="button" data-controls>Controls</button>
               <button type="button" data-open-settings>Settings</button>
               <button type="button" data-go="credits">Credits</button>
             </nav>
@@ -87,9 +89,19 @@
           <h3>Armored knight</h3>
           <p>Your kite shield travels with you. The longsword and dagger can be equipped in Frontier and Training.</p>
           <div class="option-grid"><label>Player name <input id="profile-name" maxlength="20" autocomplete="nickname"></label><label>Starting weapon <select id="loadout-weapon"></select></label></div>
+          <div class="option-grid">
+            <label>Armor cloth <select data-setting="heraldry"><option value="blue">Night blue</option><option value="amber">Amber</option><option value="umber">Umber</option></select></label>
+            <label>Title <select data-setting="title"><option>Wanderer</option><option>Road Warden</option><option>Pit Regular</option></select></label>
+          </div>
+          <canvas class="loadout-preview" id="loadout-preview" width="280" height="224" role="img" aria-label="Selected weapon in 3D"></canvas>
           <p id="loadout-detail"></p>
           <button type="button" class="paper-button" data-play-training>Try it in Training</button>
         </div>
+      </section>
+
+      <section id="career-screen" class="campaign-screen campaign-subpage" aria-labelledby="career-title" hidden>
+        <header class="screen-heading"><button type="button" class="back-link" data-go="home">← Home</button><div><h2 id="career-title">Career</h2></div></header>
+        <div class="parchment"><p class="handwritten">Entries from this browser.</p><dl id="career-ledger" class="controls-list"></dl></div>
       </section>
 
       <section id="credits-screen" class="campaign-screen campaign-subpage" aria-labelledby="credits-title" hidden>
@@ -153,6 +165,7 @@
         </div>
         <div class="hud-caption" id="hud-caption" role="status"></div>
         <div class="hud-dev" id="hud-dev" hidden></div>
+        <p id="yard-tip" class="yard-tip" hidden></p>
         <div class="hud-controls" id="hud-controls">WASD Move · Long Swipe to Swing · RMB Guard</div>
       </div>
     </section>
@@ -167,11 +180,14 @@
           <div><dt>Guard</dt><dd>Hold right click</dd></div>
           <div><dt>Sprint</dt><dd><kbd>Shift</kbd></dd></div>
           <div><dt>Pick up nearby gear</dt><dd><kbd>E</kbd></dd></div>
-          <div><dt>Equip a carried weapon</dt><dd><kbd>1</kbd>–<kbd>6</kbd></dd></div>
+          <div><dt>Equip a carried weapon</dt><dd><kbd>1</kbd>–<kbd>9</kbd></dd></div>
           <div><dt>Switch camera in Frontier or Training</dt><dd><kbd>V</kbd></dd></div>
+          <div><dt>Open the map</dt><dd><kbd>M</kbd></dd></div>
           <div><dt>Match status</dt><dd><kbd>Tab</kbd></dd></div>
           <div><dt>Return to the menu</dt><dd><kbd>Esc</kbd></dd></div>
         </dl>
+        <div class="modal-actions"><button id="swipe-test" type="button" class="button button-secondary">Test a swipe</button><button type="button" class="button button-secondary" data-open-settings>Rebind keys</button></div>
+        <p class="modal-note" id="swipe-result" role="status">Press Escape to release the mouse after a test.</p>
         <p class="modal-note">Click the game to capture the mouse. Choose your attack input in Settings. Attack again when a second ring appears on the reticle to queue a follow-up.</p>
       </div>
     </dialog>
@@ -229,6 +245,8 @@
         </div>
         <div class="settings-panel" data-setting-panel="audio" hidden>
           <label>Master volume <input type="range" data-setting="master" min="0" max="1" step="0.05"><output data-value="master"></output></label>
+          <label>Music <input type="range" data-setting="music" min="0" max="1" step="0.05"><output data-value="music"></output></label>
+          <label>Ambience <input type="range" data-setting="ambience" min="0" max="1" step="0.05"><output data-value="ambience"></output></label>
           <label>Combat effects <input type="range" data-setting="effects" min="0" max="1" step="0.05"><output data-value="effects"></output></label>
         </div>
         <div class="settings-panel" data-setting-panel="controls" hidden>
@@ -244,6 +262,7 @@
           <label>Swing sensitivity <input type="range" data-setting="swingResponse" min="0.5" max="1.5" step="0.05"><output data-value="swingResponse"></output></label>
           <label>Combo window in solo play <input type="range" data-setting="bufferWindow" min="0.15" max="0.45" step="0.01"><output data-value="bufferWindow"></output></label>
           <button type="button" class="ink-button" id="reset-combat">Reset combat tuning</button>
+          <label>Training guide <input type="checkbox" data-setting="yardGuide"></label>
           <label>Frontier camera <select data-setting="frontierView"><option value="first-person">First person</option><option value="third-person">Third person</option></select></label>
           <label>Minimap <input type="checkbox" data-setting="minimap"></label>
           <label>Terrain map overlay <select data-setting="terrainOverlay"><option value="biome">Biomes</option><option value="height">Elevation</option><option value="slope">Slope</option><option value="scatter">Scatter density</option><option value="cores">Core sites</option><option value="paths">Paths</option></select></label>
@@ -262,6 +281,10 @@
       </div>
     </dialog>
 
+    <dialog class="game-modal" id="map-dialog" aria-labelledby="map-title">
+      <div class="modal-card"><header class="modal-header"><h2 id="map-title">Field map</h2><button type="button" class="icon-button" data-close aria-label="Close field map">×</button></header>
+      <canvas id="field-map" width="510" height="510" role="img" aria-label="Map with roads, contours and strongholds"></canvas></div>
+    </dialog>
     <dialog class="game-modal" id="score-dialog" aria-labelledby="score-title">
       <div class="modal-card"><header class="modal-header"><h2 id="score-title">Match status</h2><button type="button" class="icon-button" data-close aria-label="Close match status">×</button></header><ul id="score-list" class="score-list"></ul></div>
     </dialog>
@@ -283,6 +306,7 @@
       <div class="modal-card">
         <header class="modal-header"><h2 id="end-title"></h2></header>
         <p class="modal-note" id="end-note"></p>
+        <dl id="end-ledger" class="controls-list"></dl>
         <div class="modal-actions">
           <button class="button button-primary" id="replay" type="button">Play again</button>
           <button class="button button-secondary" id="leave-end" type="button">Main menu</button>

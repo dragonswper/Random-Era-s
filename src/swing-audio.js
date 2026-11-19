@@ -69,5 +69,51 @@ export function createSwingAudio() {
     }
   }
 
-  return { unlock, play, impact, setVolume(value) { volume = value; } };
+  let beds;
+  const roots = { flintwake: 56, sunscar: 71, ironwood: 60, redcanopy: 75, frostfall: 88, ashline: 48, glassreach: 95 };
+
+  function landscape(region, music, ambience, playing) {
+    if (context?.state !== 'running') return;
+    const now = context.currentTime;
+    beds ??= [0, 1, 2].map((index) => {
+      const voice = context.createOscillator();
+      voice.type = index === 0 ? 'triangle' : 'sine';
+      const level = context.createGain();
+      level.gain.value = 0;
+      voice.connect(level).connect(context.destination);
+      voice.start();
+      return { voice, level };
+    });
+    const root = roots[region] ?? 64;
+    const interval = Math.floor(now / 7) % 4;
+    const notes = [root, root * [2, 2.25, 2, 1.5][interval], root * 1.503];
+    const levels = [playing ? ambience * .035 : 0, music * .019, music * .013];
+    for (const [i, { voice, level }] of beds.entries()) {
+      voice.frequency.setTargetAtTime(notes[i], now, .69);
+      level.gain.setTargetAtTime(levels[i], now, .24);
+    }
+  }
+
+  function footstep(surface, heavy) {
+    if (context?.state !== 'running' || !volume) return;
+    impact(surface, heavy ? 4 : 2);
+  }
+
+  function paper() {
+    if (context?.state !== 'running' || !volume) return;
+    const tone = context.createOscillator();
+    const level = context.createGain();
+    const now = context.currentTime;
+    tone.type = 'triangle';
+    tone.frequency.setValueAtTime(320, now);
+    tone.frequency.exponentialRampToValueAtTime(107, now + .055);
+    level.gain.setValueAtTime(volume * .028, now);
+    level.gain.exponentialRampToValueAtTime(.0001, now + .065);
+    tone.connect(level).connect(context.destination);
+    tone.onended = () => { tone.disconnect(); level.disconnect(); };
+    tone.start(now);
+    tone.stop(now + .07);
+  }
+
+  return { unlock, play, impact, landscape, footstep, paper, setVolume(value) { volume = value; } };
 }

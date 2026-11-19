@@ -1,5 +1,6 @@
 import './style.css';
 import './campaign.css';
+import { recordCareer } from './career.js';
 import { EraWeather } from './era-dressing.js';
 import { createWorld, worldSettings } from './world.js';
 import { prepareWorld } from './world-loader.js';
@@ -10,7 +11,7 @@ import { AttackPhase, CombatTuning, comboProgress, isSwinging, makeFlick } from 
 import { createRelativeMouse } from './mouse-swing.js';
 import { createSwingAudio } from './swing-audio.js';
 import { createSettingsStore, keyLabel } from './settings.js';
-import { cleanSeed, createInterface, newSeed, showLoading } from './interface.js';
+import { cleanSeed, createInterface, newSeed, showLoading, writeLedger } from './interface.js';
 
 const element = (id) => document.getElementById(id);
 const menu = element('menu');
@@ -26,6 +27,7 @@ const controlsDialog = element('controls-dialog');
 const pauseDialog = element('pause-dialog');
 const endDialog = element('end-dialog');
 const settingsDialog = element('settings-dialog');
+const mapDialog = element('map-dialog');
 const scoreDialog = element('score-dialog');
 const weaponSelect = element('arena-weapon');
 const networkOutput = element('network-output');
@@ -48,7 +50,7 @@ const wrapAngle = (angle) => Math.atan2(Math.sin(angle), Math.cos(angle));
 const localActor = () => networkRole === 'guest' ? match?.rival : match?.player;
 const remoteActor = () => networkRole === 'guest' ? match?.player : match?.rival;
 const isOnline = () => match?.versus === 'online';
-const canPlay = () => match?.status === 'playing' && !pauseDialog.open && !controlsDialog.open && !settingsDialog.open && !scoreDialog.open;
+const canPlay = () => match?.status === 'playing' && !pauseDialog.open && !controlsDialog.open && !settingsDialog.open && !scoreDialog.open && !mapDialog.open;
 const isCapturing = mouse.isCaptured;
 const modal = (dialog) => { if (!dialog.open) dialog.showModal(); };
 const close = (dialog) => { if (dialog.open) dialog.close(); };
@@ -60,6 +62,8 @@ let impactCaption = '';
 let eventSequence = 0;
 let heardEvent = 0;
 let lastRegion;
+let nextFoot = 0;
+let nextLandscape = 0;
 const recentImpacts = [];
 
 let match;
@@ -154,6 +158,7 @@ async function startMatch(mode, { worldSeed = newSeed(), arenaWeapon = weaponSel
     close(endDialog);
     close(settingsDialog);
     close(scoreDialog);
+    close(mapDialog);
     menu.hidden = true;
     gameScreen.hidden = false;
     canvas.focus({ preventScroll: true });
@@ -171,6 +176,7 @@ async function startMatch(mode, { worldSeed = newSeed(), arenaWeapon = weaponSel
     renderer ??= createRenderer(canvas);
     renderer.setQuality(settings.quality, settings.resolution);
     match = createGame(world, { arenaWeapon, startingWeapon: settings.weapon, versus: online ? 'online' : 'bot' });
+    localActor().heraldry = settings.heraldry;
     match.player.name = online && networkRole === 'guest' ? peerName : settings.playerName;
     if (online) match.rival.name = networkRole === 'guest' ? settings.playerName : peerName;
     const [, kit] = await Promise.race([
@@ -197,6 +203,7 @@ async function startMatch(mode, { worldSeed = newSeed(), arenaWeapon = weaponSel
     snapshotAt = performance.now();
     lastSwoosh = 0;
     lastRegion = localActor().regionId;
+    nextFoot = nextLandscape = 0;
     impacts.length = recentImpacts.length = 0;
     impactKick = impactUntil = eventSequence = heardEvent = 0;
     accumulated = 0;
@@ -236,7 +243,15 @@ function disconnect() {
   previous?.close();
 }
 
+function saveCareer() {
+  const player = localActor();
+  if (!match || !player?.stats || match.careerSaved || match.time < 1) return;
+  recordCareer(player.stats, player.regionId);
+  match.careerSaved = true;
+}
+
 function returnToMenu() {
+  saveCareer();
   if (frameRequest !== undefined) cancelAnimationFrame(frameRequest);
   frameRequest = undefined;
   unlockPointer();
@@ -248,8 +263,10 @@ function returnToMenu() {
   close(endDialog);
   close(settingsDialog);
   close(scoreDialog);
+  close(mapDialog);
   gameScreen.hidden = true;
   menu.hidden = false;
+  swingAudio.landscape(settings.theme, settings.master * settings.music, 0, false);
   ui.go('home');
   element('home-play').focus({ preventScroll: true });
 }
@@ -394,9 +411,15 @@ document.addEventListener('keydown', (event) => {
   }
   if (!canPlay()) return;
   const { code } = event;
-  if (code.startsWith('Arrow') || code === 'Tab' || code === 'KeyV' || Object.values(settings.keys).includes(code)) event.preventDefault();
+  if (code.startsWith('Arrow') || code === 'Tab' || code === 'KeyV' || code === 'KeyM' || Object.values(settings.keys).includes(code)) event.preventDefault();
   keys.add(code);
   if (event.repeat) return;
+  if (code === 'KeyM' && match.world.mode === 'frontier') {
+    unlockPointer();
+    releaseInput();
+    paintWorldMap(element('field-map'), match.world, 'biome', { border: 8 });
+    modal(mapDialog);
+  }
   if (code === 'Tab') showScore();
   if (code === settings.keys.pickup) interact = true;
   if (code === 'KeyV' && match.world.mode !== 'arena') setPerspective(!view.firstPerson);
@@ -503,6 +526,16 @@ function frame(now) {
       }
     }
   }
+  const listening = localActor();
+  if (now >= nextLandscape) {
+    nextLandscape = now + 850;
+    swingAudio.landscape(lastRegion, settings.master * settings.music, settings.master * settings.ambience, canPlay());
+  }
+  if (canPlay() && listening.speed > 1.5 && now >= nextFoot) {
+    nextFoot = now + clamp(2100 / listening.speed, 240, 560);
+    const surface = match.world.pathAt(listening.x, listening.z) > .52 ? 'stone' : 'wood';
+    swingAudio.footstep(surface, listening.speed > 7);
+  }
   impactKick *= Math.exp(-elapsed * 16);
   updateCombatFeedback(localActor(), now);
   if (settings.fps === '0' || !lastDrawAt || now - lastDrawAt >= 1000 / Number(settings.fps) - .6) {
@@ -565,6 +598,16 @@ function updateHud(now) {
   const { world } = match;
   const arena = world.mode === 'arena';
   const training = world.mode === 'training';
+  const guide = element('yard-tip');
+  guide.hidden = !training || !settings.yardGuide;
+  if (!guide.hidden) {
+    const drills = match.training;
+    setText('yard-tip', !drills.fixedHits ? 'Make small corrections, then cut through the near target.'
+      : !drills.movingHits ? 'Track a moving target before changing direction.'
+      : !drills.combos ? 'Cut again as the extra ring closes.'
+      : !drills.guardUsed ? 'Raise the shield. Watch the stamina arc drain.'
+      : 'The yard is yours. Leave through the menu when ready.');
+  }
   const region = world.regionAt(player.x, player.z);
   if (world.mode === 'frontier' && lastRegion !== region.id) {
     lastRegion = region.id;
@@ -601,7 +644,7 @@ function updateHud(now) {
   }
   const pickup = arena ? null : nearbyPickup(match);
   let message = now < noticeUntil ? notice : '';
-  if (!player.alive && !arena && match.status === 'playing') message = `Returning to your fort in ${Math.ceil(player.respawnAt - match.time)}s`;
+  if (!player.alive && !arena && match.status === 'playing') message = `The watch found you. Back in ${Math.ceil(player.respawnAt - match.time)}s.`;
   else if (!message && !isCapturing() && canPlay()) message = 'Click the game to capture the mouse';
   else if (!message && pickup) {
     const item = pickup.weaponId ? getWeapon(pickup.weaponId).name : pickup.item === 'medkit' ? 'Medkit' : 'Stamina Tonic';
@@ -668,6 +711,12 @@ function drawMap(world, player) {
 }
 
 function finish() {
+  saveCareer();
+  const stats = localActor().stats;
+  if (stats) writeLedger(element('end-ledger'), [
+    ['Damage', stats.damage], ['Accuracy', `${stats.swings ? Math.round(stats.hits / stats.swings * 100) : 0}%`],
+    ['Blocks', stats.blocks], ['Parries', stats.parries], ['Time', `${Math.floor(match.time)}s`],
+  ]);
   unlockPointer();
   releaseInput();
   close(controlsDialog);
@@ -974,6 +1023,9 @@ async function copyWorldLink() {
 function applySettings(key) {
   if (key === 'quality' || key === 'resolution') renderer?.setQuality(settings.quality, settings.resolution);
   if (key === 'master' || key === 'effects') swingAudio.setVolume(settings.master * settings.effects);
+  if (['master', 'music', 'ambience', 'theme'].includes(key)) {
+    swingAudio.landscape(lastRegion ?? settings.theme, settings.master * settings.music, settings.master * settings.ambience, Boolean(match));
+  }
   if (['attackInput', 'swingDistance', 'swipeSpeed'].includes(key)) {
     mouse.reset();
     pendingGesture = undefined;
@@ -983,5 +1035,29 @@ function applySettings(key) {
   hudAt = 0;
 }
 
+const swipeTester = createRelativeMouse(element('swipe-test'));
+element('swipe-test').addEventListener('click', async () => {
+  try {
+    await swipeTester.capture();
+    swipeTester.reset();
+    let previous = performance.now();
+    function testSwipe(now) {
+      if (!swipeTester.isCaptured()) return;
+      const { velocity, gesture } = swipeTester.sample((now - previous) / 1000, true, settings.swingDistance, settings.swipeSpeed);
+      previous = now;
+      if (gesture) setText('swipe-result', `${gesture.direction} · ${Math.round(velocity)} units/s`);
+      requestAnimationFrame(testSwipe);
+    }
+    requestAnimationFrame(testSwipe);
+  } catch { setText('swipe-result', 'Mouse capture failed. Open the game in a desktop browser tab.'); }
+});
+controlsDialog.addEventListener('close', () => { if (swipeTester.isCaptured()) document.exitPointerLock(); });
+
 const ui = createInterface(store, { onStart: startMatch, onSettings: applySettings, onExport: exportTerrain, onCopySeed: copyWorldLink });
 applySettings('master');
+document.addEventListener('click', (event) => {
+  if (!event.target.closest('#menu button')) return;
+  swingAudio.unlock();
+  swingAudio.landscape(settings.theme, settings.master * settings.music, 0, false);
+  swingAudio.paper();
+});

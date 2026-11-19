@@ -11,7 +11,7 @@ The default world uses broken ridgelines, tree silhouettes, warm haze and stone 
 | `src/world-worker.js` | Background generation and transferable height/flow buffers | Task Graph jobs | Jobs and NativeArray |
 | `src/terrain-view.js` | Streamed near tiles, distance tiers and seam skirts | Landscape component LOD | Terrain tiles and LOD Group |
 | `src/render.js` | Instancing, distant tree cards, structure kits, lighting and 3D actors | ISM/HISM components and material instances | GPU instancing and LOD Groups |
-| `public/map-kit.glb` | Named foliage, rock and castle meshes in unit bounds with their bases at ground level | Static meshes and instanced materials | Prefabs and instanced materials |
+| `public/map-kit.glb`, `public/era-props.glb` | Named foliage, rock and castle meshes in unit bounds with their bases at ground level | Static meshes and instanced materials | Prefabs and instanced materials |
 | `src/combat.js` | Swipe vectors, combat phases, buffer and cooldown | Enhanced Input and deterministic gameplay component | Input System and C# state machine |
 | `src/simulation.js` | Fixed-step movement, collision, weapons, training AI and objectives | C++ world subsystem | C# fixed-step simulation |
 
@@ -31,4 +31,4 @@ Unreal importers can transpose axes to Z up and scale positions from meters to c
 
 ## Native combat direction
 
-`public/knight.glb` opens as an assembled knight with named shoulder, elbow, wrist, and grip nodes. Both views use the same fixed-length arm chains. The renderer solves the elbow position for each hand target and keeps the gear and swing trail attached to the grips. An active-ragdoll port can feed the swipe vectors into hand IK, weapon inertia and body balance, then add grip and thrust states with physics contact events. The physics brief is the target for that phase. Browser damage currently uses game reach, timing, guard and stamina rules.
+`public/knight.glb` opens as an assembled knight with named shoulder, elbow, wrist, and grip nodes. Both views use the same fixed-length arm chains. The renderer solves the elbow position for each hand target and reads the held weapon’s trail endpoint from its Blender-authored tip. An active-ragdoll port can feed the swipe vectors into hand IK, weapon inertia and body balance, then add grip and thrust states with physics contact events. The physics brief is the target for that phase. Guard rise time, stamina drain, stagger and hit-stop are fixed-step simulation rules. Environmental dressing uses a separate seed stream and leaves the exported gameplay terrain intact.

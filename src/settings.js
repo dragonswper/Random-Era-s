@@ -3,22 +3,25 @@ export const DEFAULT_KEYS = Object.freeze({
 });
 
 export const DEFAULT_SETTINGS = Object.freeze({
-  quality: 'medium', resolution: 1, fps: '0', master: 0.85, effects: 0.9,
+  quality: 'medium', resolution: 1, fps: '0', master: 0.85, effects: 0.9, music: 0.36, ambience: 0.54,
   sensitivity: 1, swingDistance: 1, swipeSpeed: 1, swingResponse: 1, bufferWindow: 0.30, attackInput: 'swipe', invert: false, frontierView: 'first-person', minimap: true,
   terrainOverlay: 'biome', counters: false, uiScale: 1, contrast: false,
   reticleTheme: 'default', reducedMotion: false, captions: false,
+  yardGuide: true, heraldry: 'blue', title: 'Wanderer',
   playerName: 'Wanderer', weapon: 'steel-longsword', theme: 'ironwood', keys: DEFAULT_KEYS,
 });
 
 const CHOICES = {
   quality: ['low', 'medium', 'high', 'ultra'], fps: ['30', '60', '120', '0'],
   attackInput: ['swipe', 'click'],
+  heraldry: ['blue', 'amber', 'umber'],
+  title: ['Wanderer', 'Road Warden', 'Pit Regular'],
   frontierView: ['first-person', 'third-person'], terrainOverlay: ['biome', 'height', 'slope', 'scatter', 'cores', 'paths'],
   reticleTheme: ['default', 'blue'], weapon: ['steel-longsword', 'knight-dagger'],
 };
 
 const RANGES = {
-  resolution: [0.5, 1], master: [0, 1], effects: [0, 1],
+  resolution: [0.5, 1], master: [0, 1], effects: [0, 1], music: [0, 1], ambience: [0, 1],
   sensitivity: [0.35, 2.5], swingDistance: [0.75, 2], swipeSpeed: [0.75, 1.75], swingResponse: [0.5, 1.5], bufferWindow: [0.15, 0.45], uiScale: [0.9, 1.3],
 };
 

@@ -645,8 +645,18 @@ function swordLength(weapon) {
   return weapon.id === 'plasma-blade' ? 1.37 : 1.05;
 }
 
-function mountKnight(rig, model, geometries) {
+function mountKnight(rig, model, geometries, heraldry) {
   const avatar = model.clone(true);
+  const trim = { amber: '#755020', umber: '#69352a' }[heraldry];
+  let cloth;
+  if (trim) avatar.traverse((part) => {
+    if (!part.isMesh || part.material.name !== 'Night-blue wool') return;
+    if (!cloth) {
+      cloth = part.material.clone();
+      cloth.color.set(trim);
+    }
+    part.material = cloth;
+  });
   const piece = (name, parent) => {
     const group = avatar.getObjectByName(name);
     parent.add(group);
@@ -1303,7 +1313,7 @@ export function createRenderer(canvas) {
       }
       const own = member.id === player.id;
       const weapon = own ? ownWeapon : getWeapon(member.weaponId);
-      if (member.avatar === 'knight' && knightModel && !rig.knight) mountKnight(rig, knightModel, geometries);
+      if (member.avatar === 'knight' && knightModel && !rig.knight) mountKnight(rig, knightModel, geometries, member.heraldry);
       if (rig.weaponId !== weapon.id) {
         cleanGroup(rig.weapons, sharedGeometries, sharedMaterials);
         const modelPart = weapon.id === 'steel-longsword' ? 'sword' : weapon.id === 'knight-dagger' ? 'dagger' : null;

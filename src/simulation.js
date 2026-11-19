@@ -54,6 +54,7 @@ function makeActor(id, team, spawn, weaponId, region, name) {
     id, team, name, regionId: regionId(region), x: spawn.x, z: spawn.z, facing,
     spawn: { x: spawn.x, z: spawn.z, facing },
     health: 100, maxHealth: 100, stamina: 100, maxStamina: 100,
+    stats: { swings: 0, hits: 0, damage: 0, blocks: 0, parries: 0, kills: 0, chain: 0, longestCombo: 0, recordedSwing: 0 },
     alive: true, guarding: false, aimX: 0.65, aimY: 0.15, speed: 0,
     combat: createCombatState(), regenDelay: 0, guardTime: 0, guardLocked: false, stagger: 0,
     weaponId, inventory: [weaponId], respawnAt: 0, attackAt: 0, routeAt: 0,
@@ -68,7 +69,7 @@ export function createGame(world, { arenaWeapon, startingWeapon = 'steel-longswo
     world, actors: [], cores: [], pickups: [], events: [], status: 'playing', time: 0,
     player: null, rival: null, versus: arena && (versus === 'online' || versus === true) ? 'online' : 'bot',
     randomState: seedValue(world.seed), hitStop: 0,
-    training: training ? { swings: 0, fixedHits: 0, movingHits: 0, combos: 0 } : null,
+    training: training ? { swings: 0, fixedHits: 0, movingHits: 0, combos: 0, guardUsed: false } : null,
   };
 
   world.spawns.forEach((spawn, index) => {
@@ -332,6 +333,13 @@ function inStrike(game, actor, target, radius, weapon, gesture, endClearance = 0
   return (range < 0.95 || Math.cos(angle) > Cuts[gesture.direction].cone) && lineClear(game.world, actor, target, endClearance);
 }
 
+function recordContact(actor, damage) {
+  actor.stats.damage += damage;
+  if (actor.stats.recordedSwing === actor.combat.swingId) return;
+  actor.stats.recordedSwing = actor.combat.swingId;
+  actor.stats.hits++;
+}
+
 function damageActor(game, attacker, target, weapon, gesture) {
   const rules = Cuts[gesture.direction];
   const facingAttack = Math.cos(heading(target, attacker) - target.facing) > 0.25;
@@ -363,7 +371,11 @@ function damageActor(game, attacker, target, weapon, gesture) {
   } else if (!target.drill) {
     target.stagger = Math.max(target.stagger, rules.stagger);
   }
+  recordContact(attacker, Math.min(damage, target.health));
+  if (type === 'block') target.stats.blocks++;
+  if (type === 'parry') target.stats.parries++;
   target.health = Math.max(0, target.health - damage);
+  if (target.health === 0 && !target.drill) attacker.stats.kills++;
   if (game.training && attacker === game.player && target.drill) {
     if (target.drill === 'fixed') game.training.fixedHits++;
     else game.training.movingHits++;
@@ -386,6 +398,7 @@ function downActor(game, target, attackerId) {
 
 function damageCore(game, attacker, core, weapon) {
   const damage = Math.round(weapon.damage * (attacker.team === 0 ? 1.25 : 0.48));
+  recordContact(attacker, Math.min(damage, core.health));
   core.health = Math.max(0, core.health - damage);
   emit(game, 'core-hit', core, { actorId: attacker.id, targetId: core.id, team: core.team, damage, weaponId: weapon.id, surface: 'stone' });
   if (core.health !== 0) return;
@@ -444,6 +457,9 @@ function updateActor(game, actor, input, dt) {
     allowLateCombo: game.versus === 'online' && actor === game.rival,
   });
   if (combat.started) {
+    actor.stats.swings++;
+    actor.stats.chain = actor.combat.gesture.combo ? actor.stats.chain + 1 : 1;
+    actor.stats.longestCombo = Math.max(actor.stats.longestCombo, actor.stats.chain);
     actor.stamina -= weapon.stamina;
     actor.regenDelay = 0.5;
     emit(game, 'swing', actor, { actorId: actor.id, weaponId: weapon.id });
@@ -527,6 +543,7 @@ export function stepGame(game, elapsed, input = EMPTY_INPUT, rivalInput = EMPTY_
     if (strike) connectStrike(game, game.actors[index], strike.weapon, strike.gesture);
   }
   if (input.interact) collectPickup(game);
+  if (game.training && game.player.guardTime > .2) game.training.guardUsed = true;
 
   if (game.world.mode === 'arena') {
     if (!game.player.alive && !game.rival.alive) game.status = 'draw';
