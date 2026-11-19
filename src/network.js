@@ -1,4 +1,4 @@
-const CODE_VERSION = 'RE1';
+const CODE_VERSION = 'RE2';
 const CHANNEL_LABEL = 'random-eras-arena';
 const ICE_TIMEOUT = 7_000;
 const MAX_CODE_LENGTH = 24_000;
@@ -25,6 +25,7 @@ function decodeDescription(code, expectedType) {
   if (typeof code !== 'string' || code.length > MAX_CODE_LENGTH) throw invalidCode();
 
   const [version, type, sessionId, encoded, extra] = code.replace(/\s/g, '').split('.');
+  if (version === 'RE1') throw new Error('Refresh the game on both devices and create a new Arena invite.');
   if (version !== CODE_VERSION || type !== expectedType || extra !== undefined ||
       !ID_PATTERN.test(sessionId ?? '') || !/^[\w-]+$/.test(encoded ?? '')) {
     throw invalidCode();
@@ -233,6 +234,7 @@ function decodeLocalCode(code, expectedType) {
     throw new Error(`Paste the complete local Arena ${label} code.`);
   }
   const [version, type, sessionId, guestId, extra] = code.replace(/\s/g, '').split('.');
+  if (version === 'RE1') throw new Error('Refresh the game on both devices and create a new Arena invite.');
   const validGuestId = expectedType === 'local-answer' ? ID_PATTERN.test(guestId ?? '') : guestId === undefined;
   if (version !== CODE_VERSION || type !== expectedType || !ID_PATTERN.test(sessionId ?? '') ||
       !validGuestId || extra !== undefined) {

@@ -1,44 +1,69 @@
-const SWING_WINDOW_MS = 75;
-const REARM_GAP_MS = 85;
-const SWING_DISTANCE = 44;
-const MIN_DIRECTIONAL_RATIO = 0.8;
+import { CombatTuning, makeFlick } from './combat.js';
 
-export function createMouseSwing() {
-  const samples = [];
-  let lastMoveAt = -Infinity;
-  let triggered = false;
+const REARM_TIME = 0.045;
+const STALE_FRAME_TIME = 0.75;
+const NO_MOTION = Object.freeze({ dx: 0, dy: 0, velocity: 0, gesture: null });
 
-  function reset() {
-    samples.length = 0;
-    lastMoveAt = -Infinity;
-    triggered = false;
+export function createMouseSwing(minVelocity = CombatTuning.MinFlickVelocity) {
+  let dx = 0;
+  let dy = 0;
+  let quiet = REARM_TIME;
+
+  function addDelta(x, y) {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    dx += x;
+    // Browser deltas point down on Y. Combat angles use positive Y for up.
+    dy -= y;
   }
 
-  function move(dx, dy, time) {
-    if (dx === 0 && dy === 0) return;
-    if (time - lastMoveAt >= REARM_GAP_MS) reset();
-    lastMoveAt = time;
-    if (triggered) return;
+  function reset() {
+    dx = dy = 0;
+    quiet = REARM_TIME;
+  }
 
-    samples.push({ dx, dy, time });
-    while (time - samples[0].time > SWING_WINDOW_MS) samples.shift();
+  function sample(dt, canFlick) {
+    if (!Number.isFinite(dt) || dt <= 0) return NO_MOTION;
+    // Don't replay motion accumulated while the browser was stalled or inactive.
+    if (dt > STALE_FRAME_TIME) {
+      reset();
+      return NO_MOTION;
+    }
 
-    let x = 0;
-    let y = 0;
-    let path = 0;
-    for (let index = samples.length - 1; index >= 0; index--) {
-      const sample = samples[index];
-      x += sample.dx;
-      y += sample.dy;
-      path += Math.hypot(sample.dx, sample.dy);
-      const distance = Math.hypot(x, y);
-      if (distance < SWING_DISTANCE || distance < path * MIN_DIRECTIONAL_RATIO) continue;
+    const velocity = Math.hypot(dx, dy) / dt;
+    let gesture = null;
+    if (velocity >= minVelocity) {
+      if (canFlick && quiet >= REARM_TIME) gesture = makeFlick(dx, dy, velocity);
+      // A continuous fast swipe stays spent, even if it began in a locked phase.
+      quiet = 0;
+    } else {
+      quiet = Math.min(quiet + dt, REARM_TIME);
+    }
 
-      triggered = true;
-      samples.length = 0;
-      return { attack: true, attackX: x / distance, attackY: -y / distance };
+    const motion = { dx, dy, velocity, gesture };
+    dx = dy = 0;
+    return motion;
+  }
+
+  return { addDelta, sample, reset };
+}
+
+export function createRelativeMouse(canvas) {
+  const motion = createMouseSwing();
+  const isCaptured = () => document.pointerLockElement === canvas;
+  document.addEventListener('mousemove', (event) => {
+    if (isCaptured()) motion.addDelta(event.movementX, event.movementY);
+  }, { passive: true });
+
+  async function capture() {
+    if (isCaptured() || !canvas.requestPointerLock) return;
+    try {
+      await canvas.requestPointerLock({ unadjustedMovement: true });
+    } catch (error) {
+      // Some browsers provide relative movement without access to raw device input.
+      if (error?.name !== 'NotSupportedError' && !(error instanceof TypeError)) throw error;
+      await canvas.requestPointerLock();
     }
   }
 
-  return { move, reset };
+  return { isCaptured, capture, sample: motion.sample, reset: motion.reset };
 }

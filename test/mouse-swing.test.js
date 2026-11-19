@@ -1,45 +1,82 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createMouseSwing } from '../src/mouse-swing.js';
-import { createGame, stepGame } from '../src/simulation.js';
-import { createWorld } from '../src/world.js';
+import { CombatTuning, makeFlick } from '../src/combat.js';
+import { createMouseSwing, createRelativeMouse } from '../src/mouse-swing.js';
 
-test('a quick downward motion triggers a single downward swing', () => {
-  const swing = createMouseSwing();
-  assert.equal(swing.move(0, 17, 0), undefined);
-  assert.equal(swing.move(0, 15, 18), undefined);
-  assert.deepEqual(swing.move(0, 14, 36), { attack: true, attackX: 0, attackY: -1 });
-  assert.equal(swing.move(0, 90, 52), undefined);
-  assert.deepEqual(swing.move(0, 50, 150), { attack: true, attackX: 0, attackY: -1 });
+const { MinFlickVelocity } = CombatTuning;
+
+test('frame velocity distinguishes slow look from identical fast motion', () => {
+  const mouse = createMouseSwing();
+  const delta = MinFlickVelocity / 64;
+  mouse.addDelta(0, delta);
+  assert.equal(mouse.sample(1 / 32, true).gesture, null);
+  mouse.addDelta(0, delta / 2);
+  mouse.addDelta(0, delta / 2);
+  const frame = mouse.sample(1 / 64, true);
+  assert.equal(frame.velocity, MinFlickVelocity);
+  assert.deepEqual(frame.gesture, {
+    x: 0, y: -1, angle: -90, direction: 'DOWN', velocity: MinFlickVelocity,
+  });
+
+  const doubleRate = createMouseSwing();
+  doubleRate.addDelta(0, delta / 2);
+  assert.equal(doubleRate.sample(1 / 128, true).gesture.direction, 'DOWN');
 });
 
-test('ordinary aim and short back-and-forth motion leave attacks idle', () => {
-  const swing = createMouseSwing();
-  for (let time = 0; time < 500; time += 12) {
-    assert.equal(swing.move(0, 4, time), undefined);
+test('angles select four sectors while retaining the swipe vector for rendering', () => {
+  const directions = [[2, 1, 'RIGHT'], [1, 2, 'UP'], [-2, -1, 'LEFT'], [1, -2, 'DOWN']];
+  for (const [x, y, category] of directions) {
+    const flick = makeFlick(x, y, MinFlickVelocity);
+    assert.equal(flick.direction, category);
+    assert.ok(Math.abs(Math.hypot(flick.x, flick.y) - 1) < 1e-9);
+    assert.equal(flick.angle, Math.atan2(y, x) * 180 / Math.PI);
   }
-  swing.reset();
-  for (let index = 0; index < 12; index++) {
-    assert.equal(swing.move(index % 2 ? 18 : -18, 0, index * 8), undefined);
-  }
+  assert.equal(makeFlick(1, 1, MinFlickVelocity).direction, 'UP');
+  assert.equal(makeFlick(-1, 1, MinFlickVelocity).direction, 'LEFT');
+  assert.equal(makeFlick(1, -1, MinFlickVelocity).direction, 'RIGHT');
+  assert.equal(makeFlick(-1, -1, MinFlickVelocity).direction, 'DOWN');
 });
 
-test('a new flick can reverse a slow look', () => {
-  const swing = createMouseSwing();
-  swing.move(9, 0, 0);
-  swing.move(9, 0, 25);
-  assert.equal(swing.move(-23, 0, 38), undefined);
-  const attack = swing.move(-24, 0, 51);
-  assert.equal(attack?.attackX, -1);
-  assert.ok(attack.attackY === 0);
+test('a continuous swipe cannot retrigger when a locked phase opens', () => {
+  const mouse = createMouseSwing();
+  mouse.addDelta(28, 0);
+  assert.equal(mouse.sample(1 / 60, false).gesture, null);
+  mouse.addDelta(28, 0);
+  assert.equal(mouse.sample(1 / 60, true).gesture, null);
+  mouse.sample(0.05, true);
+  mouse.addDelta(-28, 0);
+  assert.equal(mouse.sample(1 / 60, true).gesture.direction, 'LEFT');
+  mouse.addDelta(-28, 0);
+  assert.equal(mouse.sample(1 / 60, true).gesture, null);
 });
 
-test('a directional attack keeps its gesture even when the heavy weapon stance lags', () => {
-  const game = createGame(createWorld('SWING', 'arena'), { arenaWeapon: 'iron-axe', versus: 'online' });
-  for (let frame = 0; frame < 24; frame++) stepGame(game, 1 / 60, { aimY: 1 });
-  const swing = createMouseSwing().move(0, 54, 0);
-  stepGame(game, 1 / 60, { aimY: 1, ...swing });
-  assert.ok(game.player.aimY > 0.5);
-  assert.equal(game.player.swingY, -1);
-  assert.ok(game.player.stamina < game.player.maxStamina);
+test('movement collected during a long stall is cleared', () => {
+  const mouse = createMouseSwing();
+  mouse.addDelta(500, 500);
+  assert.equal(mouse.sample(1.2, true).gesture, null);
+  assert.equal(mouse.sample(1 / 60, true).velocity, 0);
+});
+
+test('the browser listener captures only locked movement and falls back to relative mode', async (t) => {
+  const previousDocument = globalThis.document;
+  const mockDocument = new EventTarget();
+  globalThis.document = mockDocument;
+  t.after(() => { globalThis.document = previousDocument; });
+  const requests = [];
+  const canvas = {
+    async requestPointerLock(options) {
+      requests.push(options);
+      if (options?.unadjustedMovement) throw new DOMException('Raw input unavailable', 'NotSupportedError');
+      mockDocument.pointerLockElement = canvas;
+    },
+  };
+  const mouse = createRelativeMouse(canvas);
+  const move = () => mockDocument.dispatchEvent(Object.assign(new Event('mousemove'), { movementX: 0, movementY: -30 }));
+  move();
+  assert.equal(mouse.sample(1 / 60, true).gesture, null);
+  await mouse.capture();
+  assert.equal(mouse.isCaptured(), true);
+  assert.deepEqual(requests, [{ unadjustedMovement: true }, undefined]);
+  move();
+  assert.equal(mouse.sample(1 / 60, true).gesture.direction, 'UP');
 });

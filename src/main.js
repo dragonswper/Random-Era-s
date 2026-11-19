@@ -1,9 +1,15 @@
 import './style.css';
-import { createWorld } from './world.js';
+import './campaign.css';
+import { createWorld, worldSettings } from './world.js';
+import { prepareWorld } from './world-loader.js';
+import { paintWorldMap } from './world-map.js';
 import { WEAPONS, createGame, equipWeapon, getWeapon, nearbyPickup, stepGame } from './simulation.js';
-import { createRenderer } from './render.js';
 import { createHostSession, createGuestSession } from './network.js';
-import { createMouseSwing } from './mouse-swing.js';
+import { AttackPhase, CombatTuning, comboProgress, isSwinging, makeFlick } from './combat.js';
+import { createRelativeMouse } from './mouse-swing.js';
+import { createSwingAudio } from './swing-audio.js';
+import { createSettingsStore, keyLabel } from './settings.js';
+import { cleanSeed, createInterface, newSeed, showLoading } from './interface.js';
 
 const element = (id) => document.getElementById(id);
 const menu = element('menu');
@@ -14,25 +20,34 @@ const mapContext = minimap.getContext('2d');
 const mapLayer = document.createElement('canvas');
 mapLayer.width = minimap.width;
 mapLayer.height = minimap.height;
-const mapBase = mapLayer.getContext('2d');
 const arenaDialog = element('arena-dialog');
 const controlsDialog = element('controls-dialog');
 const pauseDialog = element('pause-dialog');
 const endDialog = element('end-dialog');
+const settingsDialog = element('settings-dialog');
+const scoreDialog = element('score-dialog');
 const weaponSelect = element('arena-weapon');
 const networkOutput = element('network-output');
 const networkInput = element('network-input');
 const networkConnect = element('network-connect');
+const reticle = element('hud-reticle');
+const swipeArrow = element('reticle-swipe');
+const comboArrow = element('reticle-combo');
 const keys = new Set();
-const mouseSwing = createMouseSwing();
-const view = { yaw: 0, pitch: -0.16, firstPerson: false, actorId: undefined };
+const mouse = createRelativeMouse(canvas);
+const swingAudio = createSwingAudio();
+const store = createSettingsStore();
+const { state: settings } = store;
+const view = { yaw: 0, pitch: -0.16, firstPerson: true, actorId: undefined };
+const cameraAim = { yaw: view.yaw, pitch: view.pitch };
+const GESTURE_LIFETIME_MS = 160;
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+const wrapAngle = (angle) => Math.atan2(Math.sin(angle), Math.cos(angle));
 const localActor = () => networkRole === 'guest' ? match?.rival : match?.player;
 const remoteActor = () => networkRole === 'guest' ? match?.player : match?.rival;
 const isOnline = () => match?.versus === 'online';
-const canPlay = () => match?.status === 'playing' && !pauseDialog.open && !controlsDialog.open;
-const isCapturing = () => document.pointerLockElement === canvas;
-const seed = () => crypto.getRandomValues(new Uint32Array(1))[0].toString(36).toUpperCase();
+const canPlay = () => match?.status === 'playing' && !pauseDialog.open && !controlsDialog.open && !settingsDialog.open && !scoreDialog.open;
+const isCapturing = mouse.isCaptured;
 const modal = (dialog) => { if (!dialog.open) dialog.showModal(); };
 const close = (dialog) => { if (dialog.open) dialog.close(); };
 
@@ -42,12 +57,16 @@ let network;
 let networkRole;
 let remoteInput = {};
 let remoteInputAt = 0;
-let guestSwing;
+let guestGesture;
+let snapshotAt = 0;
 let networkStepAt = 0;
 let lastFrame = 0;
+let lastDrawAt = 0;
+let frameSeconds = 0;
 let accumulated = 0;
 let frameRequest;
-let pendingSwing;
+let pendingGesture;
+let lastSwoosh = 0;
 let guarding = false;
 let interact = false;
 let aimX = 0.65;
@@ -57,8 +76,12 @@ let noticeUntil = 0;
 let hudAt = 0;
 let lastInventory = '';
 let blockUnlock = false;
-let lastLookAt = 0;
 let matchStarting = false;
+let pitSeed = newSeed();
+let selfReady = false;
+let peerReady = false;
+let peerName = 'Friend';
+let arenaStarting = false;
 
 for (const weapon of WEAPONS) {
   const option = document.createElement('option');
@@ -70,10 +93,18 @@ weaponSelect.value = 'steel-longsword';
 
 function releaseInput() {
   keys.clear();
-  mouseSwing.reset();
-  pendingSwing = undefined;
+  mouse.reset();
+  pendingGesture = undefined;
+  if (match && networkRole !== 'guest') localActor().combat.buffered = null;
+  Object.assign(cameraAim, { yaw: view.yaw, pitch: view.pitch });
   interact = false;
   guarding = false;
+}
+
+function setPerspective(firstPerson) {
+  view.firstPerson = firstPerson;
+  gameScreen.dataset.view = firstPerson ? 'first-person' : 'third-person';
+  canvas.setAttribute('aria-label', firstPerson ? 'First-person game view' : 'Third-person game view');
 }
 
 function unlockPointer() {
@@ -83,12 +114,12 @@ function unlockPointer() {
 }
 
 function capturePointer() {
-  if (isCapturing() || !canvas.requestPointerLock) return;
-  try {
-    Promise.resolve(canvas.requestPointerLock()).catch(() => {});
-  } catch {
-    // Browsers that restrict pointer lock still support dragging the view.
-  }
+  swingAudio.unlock();
+  mouse.capture().catch((error) => {
+    if (error?.name === 'SecurityError' && !isCapturing() && canPlay()) {
+      flash('Open the game in its own browser tab to capture the mouse.');
+    }
+  });
 }
 
 function openError(message) {
@@ -96,24 +127,49 @@ function openError(message) {
   modal(element('error-dialog'));
 }
 
-function startMatch(mode, { worldSeed = seed(), arenaWeapon = weaponSelect.value, online = false } = {}) {
+async function startMatch(mode, { worldSeed = newSeed(), arenaWeapon = weaponSelect.value,
+  online = false, preset = 'medium', era = 'random', countdown = false } = {}) {
+  if (matchStarting) return false;
   matchStarting = true;
+  const session = network;
+  let loading;
   try {
     if (!online) disconnect();
+    if (frameRequest !== undefined) cancelAnimationFrame(frameRequest);
+    frameRequest = undefined;
     close(arenaDialog);
     close(pauseDialog);
     close(controlsDialog);
     close(endDialog);
+    close(settingsDialog);
+    close(scoreDialog);
     menu.hidden = true;
     gameScreen.hidden = false;
+    canvas.focus({ preventScroll: true });
+    if (!online) capturePointer();
+    const prepared = prepareWorld(worldSeed, mode, { preset, era });
+    const graphics = import('./render.js');
+    const armor = import('./knight.js').then(({ loadKnight }) => loadKnight()).catch(() => null);
+    loading = await showLoading({ countdown });
+    const [world, { createRenderer }] = await Promise.all([prepared, graphics]);
+    loading.prepare();
     renderer ??= createRenderer(canvas);
-    const world = createWorld(worldSeed, mode);
-    match = createGame(world, { arenaWeapon, versus: online ? 'online' : 'bot' });
+    renderer.setQuality(settings.quality, settings.resolution);
+    match = createGame(world, { arenaWeapon, startingWeapon: settings.weapon, versus: online ? 'online' : 'bot' });
+    match.player.name = online && networkRole === 'guest' ? peerName : settings.playerName;
+    if (online) match.rival.name = networkRole === 'guest' ? settings.playerName : peerName;
+    await Promise.race([armor, new Promise((resolve) => setTimeout(resolve, 3200))]);
+    if (online && (network !== session || session?.status !== 'connected')) {
+      returnToMenu();
+      openError('The Arena connection closed before the duel began. Start a new invite to try again.');
+      return false;
+    }
     renderer.setWorld(world);
     Object.assign(view, {
-      yaw: localActor().facing, pitch: -0.16, firstPerson: false,
+      yaw: localActor().facing, pitch: -0.16,
       actorId: networkRole === 'guest' ? localActor().id : undefined,
     });
+    setPerspective(mode !== 'frontier' || settings.frontierView === 'first-person');
     aimX = 0.65;
     aimY = 0.15;
     notice = '';
@@ -121,23 +177,29 @@ function startMatch(mode, { worldSeed = seed(), arenaWeapon = weaponSelect.value
     hudAt = 0;
     lastInventory = null;
     networkStepAt = 0;
+    snapshotAt = performance.now();
+    lastSwoosh = 0;
     accumulated = 0;
     lastFrame = 0;
+    lastDrawAt = 0;
+    frameSeconds = 0;
     releaseInput();
     drawMapBase(world);
     updateHud(performance.now());
+    updateCombatFeedback(localActor(), performance.now());
     renderer.draw(match, view, 0);
-    canvas.focus({ preventScroll: true });
-    if (!online) capturePointer();
-    if (frameRequest !== undefined) cancelAnimationFrame(frameRequest);
     frameRequest = requestAnimationFrame(frame);
     return true;
   } catch (error) {
     console.error(error);
     returnToMenu();
-    openError('This prototype needs WebGL 2. Check that hardware acceleration is enabled and try a current desktop browser.');
+    openError(/webgl/i.test(error?.message ?? '')
+      ? 'This game needs WebGL 2. Check hardware acceleration or try a current desktop browser.'
+      : 'The world could not load. Try starting the match again.');
     return false;
   } finally {
+    loading?.done();
+    element('game-loading').hidden = true;
     matchStarting = false;
   }
 }
@@ -148,7 +210,9 @@ function disconnect() {
   networkRole = undefined;
   remoteInput = {};
   remoteInputAt = 0;
-  guestSwing = undefined;
+  guestGesture = undefined;
+  selfReady = peerReady = arenaStarting = false;
+  peerName = 'Friend';
   previous?.close();
 }
 
@@ -162,9 +226,12 @@ function returnToMenu() {
   close(pauseDialog);
   close(controlsDialog);
   close(endDialog);
+  close(settingsDialog);
+  close(scoreDialog);
   gameScreen.hidden = true;
   menu.hidden = false;
-  element('play-frontier').focus({ preventScroll: true });
+  ui.go('home');
+  element('home-play').focus({ preventScroll: true });
 }
 
 function showPause() {
@@ -188,39 +255,66 @@ function controls() {
   modal(controlsDialog);
 }
 
-function activeLook(event) {
-  if (!canPlay()) return;
-  const locked = isCapturing();
-  if (!locked && event.target !== canvas) {
-    mouseSwing.reset();
+function showScore() {
+  if (!match) return;
+  unlockPointer();
+  releaseInput();
+  const list = element('score-list');
+  list.replaceChildren();
+  for (const actor of match.actors) {
+    const item = document.createElement('li');
+    const core = match.cores[actor.team];
+    const role = actor === localActor() ? ' (you)' : '';
+    item.textContent = `${actor.name}${role} · ${Math.ceil(actor.health)} HP${core ? ` · ${core.health}% core` : ''}`;
+    list.append(item);
+  }
+  modal(scoreDialog);
+}
+
+function getComboProgress(player, now) {
+  // Between snapshots, estimate the local guest's progress so the short window stays usable.
+  const lead = networkRole === 'guest' ? clamp((now - snapshotAt) / 1000, 0, 0.075) : 0;
+  return comboProgress(player.combat, getWeapon(player.weaponId), lead);
+}
+
+function sampleMouse(now, dt) {
+  if (pendingGesture && now - pendingGesture.at > GESTURE_LIFETIME_MS) pendingGesture = undefined;
+  if (!canPlay() || !isCapturing()) return;
+  const player = localActor();
+  const { phase, swingId } = player.combat;
+  const progress = getComboProgress(player, now);
+  const canFlick = player.alive && !guarding && (phase === AttackPhase.IDLE || progress !== null);
+  const { dx, dy, velocity, gesture } = mouse.sample(dt, canFlick);
+  const magnitude = Math.hypot(dx, dy);
+  if (magnitude) {
+    const response = Math.min(magnitude / 17, 1);
+    aimX += (dx / magnitude - aimX) * response;
+    aimY += (dy / magnitude - aimY) * response;
+  }
+  if (gesture && !pendingGesture) {
+    if (progress !== null) gesture.combo = { swingId, progress };
+    pendingGesture = { value: gesture, at: now };
+  }
+
+  // The cut uses the flick vector while the camera holds its heading during contact.
+  if (phase === AttackPhase.ACTIVE_SWING) {
+    Object.assign(cameraAim, { yaw: view.yaw, pitch: view.pitch });
     return;
   }
-  const dx = clamp(event.movementX, -150, 150);
-  const dy = clamp(event.movementY, -150, 150);
-  if (!dx && !dy) return;
-  if (locked || event.buttons & 4) {
-    view.yaw = Math.atan2(Math.sin(view.yaw - dx * 0.0029), Math.cos(view.yaw - dx * 0.0029));
-    view.pitch = clamp(view.pitch - dy * 0.0025, -0.71, 0.61);
-  } else {
-    const rect = canvas.getBoundingClientRect();
-    if (event.clientX < rect.left + rect.width * 0.12) view.yaw += Math.abs(dx) * 0.003;
-    if (event.clientX > rect.right - rect.width * 0.12) view.yaw -= Math.abs(dx) * 0.003;
+  if (velocity < CombatTuning.MinFlickVelocity) {
+    cameraAim.yaw = wrapAngle(cameraAim.yaw - dx * 0.0029 * settings.sensitivity);
+    cameraAim.pitch = clamp(cameraAim.pitch + dy * 0.0025 * settings.sensitivity * (settings.invert ? -1 : 1), -0.71, 0.61);
   }
-  const magnitude = Math.hypot(dx, dy);
-  const response = Math.min(magnitude / 17, 1);
-  aimX += (dx / magnitude - aimX) * response;
-  aimY += (-dy / magnitude - aimY) * response;
-  if (!guarding && localActor().alive) {
-    const swing = mouseSwing.move(dx, dy, event.timeStamp);
-    pendingSwing ??= swing;
-  }
-  lastLookAt = performance.now();
+  const blend = 1 - Math.exp(-17 * Math.min(dt, 0.07));
+  view.yaw = wrapAngle(view.yaw + wrapAngle(cameraAim.yaw - view.yaw) * blend);
+  view.pitch += (cameraAim.pitch - view.pitch) * blend;
 }
 
 function makeInput() {
-  if (!canPlay()) return { facing: view.yaw, aimX, aimY };
-  const forward = Number(keys.has('KeyW') || keys.has('ArrowUp')) - Number(keys.has('KeyS') || keys.has('ArrowDown'));
-  const side = Number(keys.has('KeyD') || keys.has('ArrowRight')) - Number(keys.has('KeyA') || keys.has('ArrowLeft'));
+  if (!canPlay()) return { facing: view.yaw, aimX, aimY, cancelCombo: true };
+  const bound = settings.keys;
+  const forward = Number(keys.has(bound.forward) || keys.has('ArrowUp')) - Number(keys.has(bound.back) || keys.has('ArrowDown'));
+  const side = Number(keys.has(bound.right) || keys.has('ArrowRight')) - Number(keys.has(bound.left) || keys.has('ArrowLeft'));
   const sin = Math.sin(view.yaw);
   const cos = Math.cos(view.yaw);
   return {
@@ -228,20 +322,20 @@ function makeInput() {
     moveZ: forward * cos + side * sin,
     facing: view.yaw,
     aimX, aimY, interact, guard: guarding,
-    sprint: keys.has('ShiftLeft') || keys.has('ShiftRight'),
-    ...pendingSwing,
+    sprint: keys.has(bound.sprint) || (bound.sprint === 'ShiftLeft' && keys.has('ShiftRight')),
+    gesture: pendingGesture?.value,
+    cancelCombo: !isCapturing(),
   };
 }
 
-document.addEventListener('mousemove', activeLook);
 canvas.addEventListener('mousedown', (event) => {
   if (!canPlay()) return;
   event.preventDefault();
   if (!isCapturing()) capturePointer();
   if (event.button === 2) {
     guarding = true;
-    pendingSwing = undefined;
-    mouseSwing.reset();
+    pendingGesture = undefined;
+    mouse.reset();
   }
 });
 window.addEventListener('mouseup', (event) => {
@@ -249,25 +343,28 @@ window.addEventListener('mouseup', (event) => {
 });
 canvas.addEventListener('contextmenu', (event) => event.preventDefault());
 window.addEventListener('blur', releaseInput);
+document.addEventListener('visibilitychange', () => { if (document.hidden) releaseInput(); });
 document.addEventListener('pointerlockchange', () => {
-  mouseSwing.reset();
-  pendingSwing = undefined;
+  mouse.reset();
+  pendingGesture = undefined;
+  hudAt = 0;
   if (!isCapturing() && !blockUnlock && !matchStarting && match?.status === 'playing') showPause();
   blockUnlock = false;
 });
 document.addEventListener('keydown', (event) => {
-  if (event.code === 'Escape' && match?.status === 'playing' && !pauseDialog.open && !controlsDialog.open) {
+  if (event.code === 'Escape' && canPlay()) {
     event.preventDefault();
     showPause();
     return;
   }
   if (!canPlay()) return;
   const { code } = event;
-  if (code.startsWith('Arrow') || ['Space', 'KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyE', 'KeyV'].includes(code)) event.preventDefault();
+  if (code.startsWith('Arrow') || code === 'Tab' || code === 'KeyV' || Object.values(settings.keys).includes(code)) event.preventDefault();
   keys.add(code);
   if (event.repeat) return;
-  if (code === 'KeyE') interact = true;
-  if (code === 'KeyV' && match.world.mode === 'frontier') view.firstPerson = !view.firstPerson;
+  if (code === 'Tab') showScore();
+  if (code === settings.keys.pickup) interact = true;
+  if (code === 'KeyV' && match.world.mode !== 'arena') setPerspective(!view.firstPerson);
   if (/^Digit[1-6]$/.test(code)) equipWeapon(match, Number(code.at(-1)) - 1);
 });
 document.addEventListener('keyup', (event) => keys.delete(event.code));
@@ -275,19 +372,22 @@ document.addEventListener('keyup', (event) => keys.delete(event.code));
 for (const button of document.querySelectorAll('[data-controls]')) button.addEventListener('click', controls);
 for (const button of document.querySelectorAll('[data-open-arena]')) button.addEventListener('click', () => {
   element('network-panel').hidden = true;
+  pitSeed = newSeed();
+  refreshArenaLobby();
   modal(arenaDialog);
 });
 for (const button of document.querySelectorAll('[data-close]')) {
   button.addEventListener('click', () => close(button.closest('dialog')));
 }
-element('play-frontier').addEventListener('click', () => startMatch('frontier'));
-element('mode-frontier').addEventListener('click', () => startMatch('frontier'));
-element('practice').addEventListener('click', () => startMatch('arena'));
+element('practice').addEventListener('click', readyArena);
+element('arena-roll').addEventListener('click', () => { pitSeed = newSeed(); arenaConfigChanged(); });
+element('arena-era').addEventListener('change', arenaConfigChanged);
+weaponSelect.addEventListener('change', arenaConfigChanged);
 element('pause').addEventListener('click', showPause);
 element('resume').addEventListener('click', resume);
 element('quit').addEventListener('click', returnToMenu);
 element('leave-end').addEventListener('click', returnToMenu);
-element('replay').addEventListener('click', () => startMatch(match.world.mode));
+element('replay').addEventListener('click', () => startMatch(match.world.mode, match.world.settings));
 pauseDialog.addEventListener('cancel', (event) => { event.preventDefault(); resume(); });
 endDialog.addEventListener('cancel', (event) => { event.preventDefault(); returnToMenu(); });
 
@@ -306,7 +406,7 @@ function processEvents(events, now) {
     if (event.type === 'core-destroyed' && event.team !== team) flash('Rival core destroyed', now);
     if (event.type === 'block' && event.targetId === id) flash(event.directional ? 'Directed guard' : 'Guarded hit', now);
     if (event.type === 'respawn' && event.actorId === id) {
-      view.yaw = localActor().facing;
+      view.yaw = cameraAim.yaw = localActor().facing;
       flash('Respawned at your stronghold', now);
     }
   }
@@ -315,24 +415,27 @@ function processEvents(events, now) {
 function frame(now) {
   frameRequest = undefined;
   if (!match) return;
-  const elapsed = lastFrame ? Math.min((now - lastFrame) / 1000, 0.07) : 0;
+  const frameTime = lastFrame ? (now - lastFrame) / 1000 : 0;
+  const elapsed = Math.min(frameTime, 0.07);
   lastFrame = now;
+  if (frameTime > 0 && frameTime < .5) frameSeconds = frameSeconds ? frameSeconds + (frameTime - frameSeconds) * .08 : frameTime;
   if (match.status === 'playing') {
+    sampleMouse(now, frameTime);
     if (isOnline() && networkRole === 'guest') {
-      if (now >= networkStepAt) {
+      if (now >= networkStepAt || pendingGesture) {
         const sent = network?.send({ type: 'input', input: makeInput() });
-        if (sent) pendingSwing = undefined;
+        if (sent) pendingGesture = undefined;
         networkStepAt = now + 33;
       }
     } else if (canPlay() || isOnline()) {
       accumulated += elapsed;
       while (accumulated >= 1 / 60 && match.status === 'playing') {
         const input = makeInput();
-        const peer = now - remoteInputAt < 500 ? { ...remoteInput, ...guestSwing } : {};
-        guestSwing = undefined;
+        const peer = now - remoteInputAt < 500 ? { ...remoteInput, gesture: guestGesture } : { cancelCombo: true };
+        guestGesture = undefined;
         stepGame(match, 1 / 60, input, peer);
         processEvents(match.events, now);
-        pendingSwing = undefined;
+        pendingGesture = undefined;
         interact = false;
         accumulated -= 1 / 60;
       }
@@ -342,7 +445,11 @@ function frame(now) {
       }
     }
   }
-  renderer.draw(match, view, elapsed);
+  updateCombatFeedback(localActor(), now);
+  if (settings.fps === '0' || !lastDrawAt || now - lastDrawAt >= 1000 / Number(settings.fps) - .6) {
+    renderer.draw(match, { ...view, reducedMotion: settings.reducedMotion }, lastDrawAt ? (now - lastDrawAt) / 1000 : elapsed);
+    lastDrawAt = now;
+  }
   if (now >= hudAt) {
     updateHud(now);
     hudAt = now + 100;
@@ -363,20 +470,47 @@ function setMeter(id, value, maximum) {
   setText(`${id}-value`, String(Math.ceil(value)));
 }
 
+function showSwipe(arrow, gesture) {
+  if (arrow.hidden !== !gesture) arrow.hidden = !gesture;
+  // CSS rotates clockwise because screen Y points down.
+  const angle = gesture ? `${-gesture.angle}deg` : '';
+  if (arrow.style.getPropertyValue('--swipe-angle') !== angle) arrow.style.setProperty('--swipe-angle', angle);
+}
+
+function updateCombatFeedback(player, now) {
+  const { combat } = player;
+  const gesture = isSwinging(combat) ? combat.gesture : null;
+  const direction = gesture?.direction ?? '';
+  if (reticle.dataset.phase !== combat.phase) reticle.dataset.phase = combat.phase;
+  if (reticle.dataset.direction !== direction) reticle.dataset.direction = direction;
+  reticle.classList.toggle('guarding', player.guarding);
+  reticle.classList.toggle('buffer-open', getComboProgress(player, now) !== null);
+  showSwipe(swipeArrow, gesture);
+  showSwipe(comboArrow, combat.buffered);
+
+  if (combat.phase === AttackPhase.ACTIVE_SWING && combat.swingId !== lastSwoosh) {
+    lastSwoosh = combat.swingId;
+    swingAudio.play(gesture.velocity);
+  }
+  setText('hud-caption', settings.captions && combat.phase === AttackPhase.ACTIVE_SWING ? `${direction[0]}${direction.slice(1).toLowerCase()} swing` : '');
+}
+
 function updateHud(now) {
   const player = localActor();
   const rival = remoteActor();
   const { world } = match;
   const arena = world.mode === 'arena';
+  const training = world.mode === 'training';
   const region = world.regionAt(player.x, player.z);
   const startingRegion = world.regions.find(({ id }) => id === player.regionId);
-  setText('hud-mode', arena ? 'ARENAS · 1V1' : 'FRONTIER');
-  setText('hud-region', region.name);
-  setText('hud-faction', arena ? (isOnline() ? 'Online duel' : 'Practice duel') : startingRegion.faction);
-  setText('hud-objective', arena ? 'Defeat your challenger' : 'Defend your core. Destroy rival cores.');
+  setText('hud-mode', training ? 'TRAINING' : arena ? 'ARENAS · 1V1' : 'FRONTIER');
+  setText('hud-region', training ? 'Training Yard' : arena ? 'The Pit' : region.name);
+  setText('hud-faction', training ? 'Harmless targets' : arena ? `${region.era} · ${isOnline() ? 'Online duel' : 'Practice duel'}` : startingRegion.faction);
+  setText('hud-objective', training ? 'Practice on fixed and moving targets' : arena ? 'Defeat your challenger' : 'Defend your core. Destroy rival cores.');
   const ownCore = match.cores[0];
   const remaining = match.cores.filter((core) => core.team && core.health > 0).length;
-  setText('hud-cores', arena ? '' : `Your core ${Math.ceil(100 * ownCore.health / ownCore.maxHealth)}% · Rival cores ${remaining}`);
+  setText('hud-cores', training ? `Fixed hits ${match.training.fixedHits} · Moving hits ${match.training.movingHits} · Combos ${match.training.combos}`
+    : arena ? '' : `Your core ${Math.ceil(100 * ownCore.health / ownCore.maxHealth)}% · Rival cores ${remaining}`);
   setMeter('health', player.health, player.maxHealth);
   setMeter('stamina', player.stamina, player.maxStamina);
   element('rival-vitals').hidden = !rival;
@@ -404,14 +538,22 @@ function updateHud(now) {
     const item = pickup.weaponId ? getWeapon(pickup.weaponId).name : pickup.item === 'medkit' ? 'Medkit' : 'Stamina Tonic';
     message = `[E] Pick up ${item}`;
   }
-  if (now - lastLookAt > 23000 && !isCapturing() && !message && isOnline()) message = 'Click the arena to capture the mouse';
+  if (!isCapturing() && !message && match.status === 'playing') message = 'Click the game to capture the mouse';
   setText('hud-message', message);
   setText('hud-seed', `SEED ${world.seed}`);
+  const bound = settings.keys;
+  const directions = [bound.forward, bound.left, bound.back, bound.right].map(keyLabel);
+  const movement = directions.join(directions.every((key) => key.length === 1) ? '' : '/');
   setText('hud-controls', arena
-    ? 'WASD Move · Flick Mouse to Swing · RMB Guard'
-    : 'WASD Move · Flick Mouse to Swing · RMB Guard · E Pick up · V Camera');
-  element('hud-reticle').classList.toggle('guarding', player.guarding);
-  drawMap(world, player);
+    ? `${movement} Move · Flick to Swing · RMB Guard · Tab Status`
+    : `${movement} Move · Flick to Swing · RMB Guard · ${keyLabel(bound.pickup)} Pick up · V Camera · Tab Status`);
+  element('hud-map').hidden = !settings.minimap;
+  element('hud-dev').hidden = !settings.counters;
+  if (settings.counters) {
+    const stats = renderer.stats();
+    setText('hud-dev', `${Math.round(1 / (frameSeconds || 1 / 60))} FPS · ${stats.detailedChunks}/${stats.chunks} detailed chunks · ${stats.props} props`);
+  }
+  if (settings.minimap) drawMap(world, player);
 }
 
 function mapPosition(world, x, z) {
@@ -420,22 +562,7 @@ function mapPosition(world, x, z) {
 }
 
 function drawMapBase(world) {
-  if (!mapBase) return;
-  const width = mapLayer.width - 12;
-  mapBase.fillStyle = '#19211e';
-  mapBase.fillRect(0, 0, mapLayer.width, mapLayer.height);
-  const resolution = 41;
-  const size = width / resolution;
-  for (let row = 0; row < resolution; row++) {
-    for (let column = 0; column < resolution; column++) {
-      const x = world.size * ((column + 0.5) / resolution - 0.5);
-      const z = world.size * ((row + 0.5) / resolution - 0.5);
-      const region = world.regionAt(x, z);
-      const height = world.height(x, z);
-      mapBase.fillStyle = height > 4 ? region.groundLight : region.ground;
-      mapBase.fillRect(6 + column * size, 6 + row * size, Math.ceil(size), Math.ceil(size));
-    }
-  }
+  paintWorldMap(mapLayer, world, settings.terrainOverlay, { markers: false, border: 6 });
 }
 
 function drawMap(world, player) {
@@ -496,49 +623,149 @@ function sendSnapshot() {
   });
 }
 
+function arenaConfig() {
+  return { worldSeed: pitSeed, era: element('arena-era').value, arenaWeapon: weaponSelect.value };
+}
+
+function updateArenaLabels() {
+  const config = arenaConfig();
+  const preview = createWorld(pitSeed, 'arena', config);
+  arenaDialog.dataset.era = preview.regions[0].id;
+  setText('arena-seed-label', `PIT-${pitSeed}`);
+  setText('arena-era-label', preview.regions[0].era);
+}
+
+function refreshArenaLobby() {
+  updateArenaLabels();
+  const connected = network?.status === 'connected';
+  const ready = element('practice');
+  ready.disabled = Boolean(arenaStarting || (network && !connected));
+  ready.textContent = selfReady && connected ? 'Unready' : 'Ready';
+  setText('arena-opponent', network ? peerName : 'Pit sparring bot');
+  setText('arena-self-status', selfReady ? 'Ready ✓' : 'Setting up');
+  setText('arena-peer-status', !network || peerReady ? 'Ready ✓' : connected ? 'Setting up' : 'Waiting to connect');
+  element('arena-self-status').classList.toggle('is-ready', selfReady);
+  element('arena-peer-status').classList.toggle('is-ready', !network || peerReady);
+  weaponSelect.disabled = networkRole === 'guest' || arenaStarting;
+  element('arena-era').disabled = weaponSelect.disabled;
+  element('arena-roll').disabled = weaponSelect.disabled;
+}
+
+function sendArenaConfig() {
+  if (networkRole === 'host' && network?.status === 'connected') {
+    network.send({ type: 'arena-config', ...arenaConfig(), name: settings.playerName });
+  }
+}
+
+function arenaConfigChanged() {
+  selfReady = peerReady = false;
+  sendArenaConfig();
+  refreshArenaLobby();
+}
+
+function readArenaConfig(message) {
+  const worldSeed = cleanSeed(message.worldSeed ?? '');
+  if (!worldSeed || !WEAPONS.some(({ id }) => id === message.arenaWeapon)) return null;
+  const { era } = worldSettings({ era: message.era });
+  return { worldSeed, era, arenaWeapon: message.arenaWeapon };
+}
+
+function maybeStartOnlineArena() {
+  if (networkRole !== 'host' || !selfReady || !peerReady || match || arenaStarting) return;
+  const config = arenaConfig();
+  if (!network?.send({ type: 'start', ...config })) return;
+  arenaStarting = true;
+  refreshArenaLobby();
+  startMatch('arena', { ...config, online: true, countdown: true });
+}
+
+function readyArena() {
+  if (!network) {
+    startMatch('arena', arenaConfig());
+  } else if (network.send({ type: 'ready', ready: !selfReady, name: settings.playerName })) {
+    selfReady = !selfReady;
+    refreshArenaLobby();
+    maybeStartOnlineArena();
+  }
+}
+
+function readRemoteGesture(value) {
+  if (!value || ![value.x, value.y, value.velocity].every(Number.isFinite)
+      || value.velocity < CombatTuning.MinFlickVelocity) return null;
+  const gesture = makeFlick(clamp(value.x, -1, 1), clamp(value.y, -1, 1), value.velocity);
+  const combo = value.combo;
+  if (gesture && Number.isSafeInteger(combo?.swingId) && Number.isFinite(combo.progress)) {
+    gesture.combo = { swingId: combo.swingId, progress: combo.progress };
+  }
+  return gesture;
+}
+
+function validCombatSnapshot(combat) {
+  if (!combat || !Object.hasOwn(AttackPhase, combat.phase) || !Number.isFinite(combat.elapsed)
+      || combat.elapsed < 0 || !Number.isSafeInteger(combat.swingId) || combat.swingId < 0
+      || (isSwinging(combat) && !combat.gesture)) return false;
+  return [combat.gesture, combat.buffered].every((gesture) => gesture === null
+    || (gesture && [gesture.x, gesture.y, gesture.angle, gesture.velocity].every(Number.isFinite)
+      && ['LEFT', 'RIGHT', 'UP', 'DOWN'].includes(gesture.direction)));
+}
+
 function applyOnlineMessage(message) {
+  if (message.type === 'ready' && !match && !arenaStarting) {
+    peerReady = message.ready === true;
+    if (typeof message.name === 'string') peerName = message.name.trim().slice(0, 20) || 'Friend';
+    refreshArenaLobby();
+    maybeStartOnlineArena();
+    return;
+  }
   if (networkRole === 'host' && message.type === 'input' && message.input && typeof message.input === 'object') {
     const from = message.input;
     remoteInput = {
       moveX: from.moveX, moveZ: from.moveZ, facing: from.facing,
       aimX: from.aimX, aimY: from.aimY, guard: from.guard === true, sprint: from.sprint === true,
+      cancelCombo: from.cancelCombo === true,
     };
-    if (from.guard === true) guestSwing = undefined;
-    else if (from.attack === true && Number.isFinite(from.attackX) && Number.isFinite(from.attackY)) {
-      guestSwing ??= { attack: true, attackX: from.attackX, attackY: from.attackY };
-    }
+    if (remoteInput.guard || remoteInput.cancelCombo) guestGesture = undefined;
+    else guestGesture ??= readRemoteGesture(from.gesture);
     remoteInputAt = performance.now();
   } else if (networkRole === 'guest') {
-    if (message.type === 'start' && !match && typeof message.seed === 'string' && /^[A-Z\d]{1,12}$/.test(message.seed)) {
-      startMatch('arena', { worldSeed: message.seed, arenaWeapon: message.weapon, online: true });
+    if ((message.type === 'arena-config' || message.type === 'start') && !match) {
+      const config = readArenaConfig(message);
+      if (!config) return;
+      if (message.type === 'start') {
+        arenaStarting = true;
+        startMatch('arena', { ...config, online: true, countdown: true });
+      } else {
+        if (typeof message.name === 'string') peerName = message.name.trim().slice(0, 20) || 'Friend';
+        pitSeed = config.worldSeed;
+        element('arena-era').value = config.era;
+        weaponSelect.value = config.arenaWeapon;
+        selfReady = peerReady = false;
+        refreshArenaLobby();
+      }
     } else if (message.type === 'snapshot' && match && match.status === 'playing') {
       const { actors, time, status } = message;
       if (!Array.isArray(actors) || actors.length !== 2 || !Number.isFinite(time) || time < match.time
           || !['playing', 'won', 'lost', 'draw'].includes(status)
           || actors.some((actor, index) => !actor || actor.id !== match.actors[index].id
+            || !validCombatSnapshot(actor.combat)
             || !['x', 'z', 'facing', 'health', 'stamina', 'maxHealth', 'maxStamina'].every((key) => Number.isFinite(actor[key])))) return;
       match.actors = actors;
       match.player = actors[0];
       match.rival = actors[1];
       match.time = time;
       match.status = status;
+      snapshotAt = performance.now();
     }
   }
 }
 
 function onlineStatus(status, detail) {
   if (status === 'connected') {
-    if (networkRole === 'host' && !match) {
-      const worldSeed = seed();
-      const arenaWeapon = weaponSelect.value;
-      if (startMatch('arena', { worldSeed, arenaWeapon, online: true })) {
-        network.send({ type: 'start', seed: worldSeed, weapon: arenaWeapon });
-        flash('Friend connected. Click to capture the mouse.');
-      }
-    } else if (match) {
+    if (match) {
       flash('Arena connection restored');
     } else {
-      setText('network-status', 'Connected. Waiting for the host to start…');
+      sendArenaConfig();
+      setText('network-status', 'Connected. Both fighters can ready up.');
     }
   } else if (status === 'disconnected' || status === 'failed') {
     const message = detail || 'Your opponent disconnected. You can return to the main menu and start a new invite.';
@@ -552,6 +779,7 @@ function onlineStatus(status, detail) {
     setText('network-status', detail);
     element('network-input-field').hidden = false;
   }
+  if (!match) refreshArenaLobby();
 }
 
 async function openNetwork(role, transport) {
@@ -569,6 +797,7 @@ async function openNetwork(role, transport) {
     const create = role === 'host' ? createHostSession : createGuestSession;
     const session = create({ transport, onMessage: applyOnlineMessage, onStatus: onlineStatus });
     network = session;
+    refreshArenaLobby();
     if (role === 'host') {
       const code = await session.createInvite();
       if (network !== session) return;
@@ -627,3 +856,53 @@ element('network-copy').addEventListener('click', async () => {
 arenaDialog.addEventListener('close', () => {
   if (!isOnline() && !matchStarting) disconnect();
 });
+
+function exportTerrain() {
+  if (!match) return 'Start a world to export its terrain.';
+  const { world } = match;
+  const width = world.terrain?.width ?? 57;
+  const step = world.size / (width - 1);
+  const elevations = [];
+  const biomeWeights = [];
+  for (let row = 0; row < width; row++) for (let column = 0; column < width; column++) {
+    const x = column * step - world.size / 2;
+    const z = row * step - world.size / 2;
+    elevations.push(Number(world.height(x, z).toFixed(4)));
+    biomeWeights.push(world.biomeWeights(x, z).map((weight) => Number(weight.toFixed(4))));
+  }
+  const document = {
+    version: 1, seed: world.seed, mode: world.mode, settings: world.settings,
+    grid: { width, step, origin: [-world.size / 2, -world.size / 2], elevations, biomeWeights },
+    regions: world.regions, river: world.river ?? null, paths: world.paths ?? [],
+    cores: world.forts.map((fort) => fort.core), spawns: world.spawns,
+    placements: world.props.map((prop) => ({ ...prop, region: prop.region.id, y: world.height(prop.x, prop.z) })),
+  };
+  const url = URL.createObjectURL(new Blob([JSON.stringify(document)], { type: 'application/json' }));
+  const link = window.document.createElement('a');
+  link.href = url;
+  link.download = `random-eras-${world.seed}.json`;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+  return 'Terrain exported as JSON.';
+}
+
+async function copyWorldLink() {
+  if (match?.world.mode !== 'frontier') return 'Start a Frontier world to copy a link.';
+  const url = new URL(window.location.href);
+  url.search = new URLSearchParams({ seed: match.world.seed, size: match.world.settings.preset, era: match.world.settings.era });
+  try {
+    await navigator.clipboard.writeText(url.href);
+    return 'World link copied.';
+  } catch { return `Seed ${match.world.seed} · ${match.world.settings.preset} · ${match.world.settings.era}`; }
+}
+
+function applySettings(key) {
+  if (key === 'quality' || key === 'resolution') renderer?.setQuality(settings.quality, settings.resolution);
+  if (key === 'master' || key === 'effects') swingAudio.setVolume(settings.master * settings.effects);
+  if (match && key === 'terrainOverlay') drawMapBase(match.world);
+  if (match?.world.mode === 'frontier' && key === 'frontierView') setPerspective(settings.frontierView === 'first-person');
+  hudAt = 0;
+}
+
+const ui = createInterface(store, { onStart: startMatch, onSettings: applySettings, onExport: exportTerrain, onCopySeed: copyWorldLink });
+applySettings('master');

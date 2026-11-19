@@ -1,9 +1,10 @@
-# Random Era’s
+# Random Eras
 
-A browser-based 3D melee prototype with two modes.
+A first-person browser melee game with seeded terrain, a playable armored knight, and three modes.
 
-- **Frontier** generates a fresh landscape with four regions, fortresses, and scattered gear. Your starting region determines your character’s faction and appearance. Defend your core and destroy the other three to win. You can respawn while your core survives.
-- **Arenas** is a melee-only 1v1 in an enclosed ring. Pick a weapon for both fighters, then practice against a bot or duel a friend.
+- **Frontier** puts four strongholds in one landscape. Explore, collect era weapons, defend your core and destroy the rival cores. Use a daily seed or choose a starting era, size and seed.
+- **The Pit** is an enclosed melee duel against a bot or a friend. Both fighters ready up before an online duel.
+- **Training** has stationary and strafing targets that reset after being defeated. Practice movement, flicks, switching targets and chaining attacks without incoming damage.
 
 ## Run locally
 
@@ -12,34 +13,42 @@ Use Node.js 22.12 or later and a desktop browser with WebGL 2.
 ```sh
 npm ci
 npm run dev
+npm test
+npm run build
 ```
 
-Open the address Vite prints. Run `npm run build` to produce a static site in `dist/`.
+Vite prints the local URL. The production build is in `dist/`.
 
-## Controls
+## Default controls
 
 | Input | Action |
 | --- | --- |
-| WASD | Move |
+| WASD / arrow keys | Move |
 | Gentle mouse movement | Look and position your weapon |
-| Quick mouse flick | Swing in the direction of motion |
-| Right click | Hold to guard |
+| Quick mouse flick | Slash up, down, left or right |
+| Flick when the reticle shows an extra ring | Queue a follow-up during the final 30% of the active swing |
+| Hold right click | Guard with the shield |
 | Shift | Sprint |
 | E | Pick up nearby gear |
 | 1–6 | Equip a carried weapon |
-| V | Switch between third and first person in Frontier |
-| Escape | Open the game menu |
+| V | Switch between first and third person in Frontier or Training |
+| Tab | Match status |
+| Escape | Game menu |
 
-Flick down for a downward swing. Heavier weapons respond more slowly and pull the camera farther during attacks. Third person is the default.
+Click the game if it needs to capture the mouse. The cursor is hidden while captured, with unadjusted relative movement when supported. `CombatTuning` in `src/combat.js` exposes `MinFlickVelocity`, `InputCooldown`, and `BufferWindow`. Per-weapon timing lives in `src/simulation.js`.
 
-## Online Arenas
+## Play with a friend
 
-1. The host opens **Arenas**, selects a weapon, and clicks **Invite a friend**. Share the invite code privately.
-2. The guest opens **Arenas**, clicks **Join a friend**, and pastes the invite. Send the generated response code back to the host.
-3. The host pastes the response to open the match.
+1. Open **Arena**. The host picks an age and weapon and selects **Invite a friend**.
+2. The guest opens **Join a friend**, pastes the invite, and sends back the generated response.
+3. The host pastes the response. Both players select **Ready**.
 
-The connection uses WebRTC with no relay or public matchmaking. If you’re testing on one machine, **Play across two tabs** uses the same code exchange in two windows or tabs of one browser. Keep both windows visible to avoid background throttling.
+Both players should load the current build. The connection uses direct WebRTC. **Play across two tabs** uses the same code exchange for side-by-side windows in one browser profile. The Frontier camp is a local lobby preview with bot rivals.
 
-## Porting to a game engine
+## Porting and credits
 
-`src/world.js` generates seeded terrain, props, spawn points, and collision data. `src/simulation.js` advances movement, combat, opponents, and objectives from input and elapsed time. Both run independently of the browser and Three.js. A Unity or Unreal port can translate these modules and replace the browser input, renderer, and networking layers with native equivalents.
+Terrain generation and combat timing run independently of the browser renderer. Terrain exports and the engine mapping are documented in [PORTING.md](PORTING.md). The menu flow and design tokens are documented in [UI_PORTING.md](UI_PORTING.md).
+
+The playable armor, equipment, and portrait are adapted from **Armor Set** by gimora. The game asset separates rigid pieces, resets weapon pivots, and resizes textures for the browser. This modified asset and portrait are distributed under CC BY-NC-SA 4.0. [Original model](https://sketchfab.com/3d-models/armor-set-a28d0e34d39b47c59d599bf7bc790fb2) · [License](https://creativecommons.org/licenses/by-nc-sa/4.0/)
+
+The training drills draw on the glossary’s distinctions between flicking, microcorrection, target switching and smooth tracking. The reference review covered the Markdown and configuration at commit `4bc23a8`; no repository code or dependencies are used. [Aiming Taxonomy](https://github.com/aiming-taxonomy/glossary/tree/4bc23a80e80563b7e027f7aaeda12385da0d114a)

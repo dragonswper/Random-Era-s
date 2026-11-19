@@ -1,9 +1,14 @@
 import * as THREE from 'three';
+import { AttackPhase, isSwinging } from './combat.js';
+import { loadKnight } from './knight.js';
+import { createTerrainView } from './terrain-view.js';
+import { WorldTuning } from './world.js';
 import { getWeapon } from './simulation.js';
 
 const UP = new THREE.Vector3(0, 1, 0);
 const TAU = Math.PI * 2;
 const TRAIL_SEGMENTS = 24;
+const VIEW_MODEL_SCALE = 0.64;
 const clamp = THREE.MathUtils.clamp;
 const mixes = THREE.MathUtils.lerp;
 
@@ -21,6 +26,12 @@ function tone(value, amount) {
 }
 
 function createGeometries() {
+  const treeCard = new THREE.BufferGeometry();
+  treeCard.setAttribute('position', new THREE.Float32BufferAttribute([
+    -.65, -.48, 0, .65, -.48, 0, 0, .53, 0,
+    0, -.48, -.65, 0, -.48, .65, 0, .53, 0,
+  ], 3));
+  treeCard.computeVertexNormals();
   return {
     box: new THREE.BoxGeometry(),
     rock: new THREE.IcosahedronGeometry(0.62, 0),
@@ -32,93 +43,8 @@ function createGeometries() {
     cone: new THREE.ConeGeometry(0.67, 1, 7),
     roof: new THREE.CylinderGeometry(0.05, 0.67, 1, 4),
     shadows: new THREE.PlaneGeometry(2, 2).rotateX(-Math.PI / 2),
+    treeCard,
   };
-}
-
-function createTerrain(world) {
-  const edge = world.size / 2;
-  const segments = world.mode === 'arena' ? 64 : 106;
-  const step = world.size / segments;
-  const samples = [];
-  const cachedColors = new Map();
-  const path = new THREE.Color();
-  const mixed = new THREE.Color();
-  const scratch = new THREE.Color();
-
-  function groundAt(x, z) {
-    const region = world.regionAt(x, z);
-    if (!cachedColors.has(region.id)) {
-      cachedColors.set(region.id, [color(region.ground), color(region.groundLight)]);
-    }
-    return cachedColors.get(region.id);
-  }
-
-  function sample(x, z) {
-    const main = groundAt(x, z);
-    path.set(world.regionAt(x, z).path || '#ac9365');
-    const grain = noise(x, z, 9);
-    const waves = 0.3 + Math.sin(x * 0.35 + z * 0.15) * 0.15 + grain * 0.24;
-    mixed.copy(main[0]).lerp(main[1], waves);
-    if (world.mode !== 'arena') {
-      const neighbors = [
-        groundAt(x - 3.9, z), groundAt(x + 3.9, z),
-        groundAt(x, z - 3.9), groundAt(x, z + 3.9),
-      ];
-      for (const pair of neighbors) {
-        if (pair !== main) mixed.lerp(scratch.copy(pair[0]).lerp(pair[1], waves), 0.19);
-      }
-    }
-    mixed.lerp(path, (world.pathAt?.(x, z) || 0) * 0.46);
-    return [x, world.height(x, z), z, mixed.r, mixed.g, mixed.b];
-  }
-
-  for (let row = 0; row <= segments; row += 1) {
-    for (let col = 0; col <= segments; col += 1) {
-      const outside = col === 0 || col === segments || row === 0 || row === segments;
-      const x = col * step - edge + (outside ? 0 : (noise(col, row, 3) - 0.5) * step * 0.75);
-      const z = row * step - edge + (outside ? 0 : (noise(col, row, 4) - 0.5) * step * 0.75);
-      samples.push(sample(x, z));
-    }
-  }
-
-  const positions = new Float32Array(segments * segments * 18);
-  const colors = new Float32Array(positions.length);
-  let offset = 0;
-
-  function triangle(a, b, c, variation) {
-    const shade = 0.92 + variation * 0.15;
-    for (const i of [a, b, c]) {
-      const item = samples[i];
-      positions[offset] = item[0];
-      colors[offset++] = item[3] * shade;
-      positions[offset] = item[1];
-      colors[offset++] = item[4] * shade;
-      positions[offset] = item[2];
-      colors[offset++] = item[5] * shade;
-    }
-  }
-
-  for (let row = 0; row < segments; row += 1) {
-    for (let col = 0; col < segments; col += 1) {
-      const a = row * (segments + 1) + col;
-      const b = a + 1;
-      const c = a + segments + 1;
-      const d = c + 1;
-      if ((row + col) % 2) {
-        triangle(a, c, d, noise(col, row, 8));
-        triangle(a, d, b, noise(col, row, 9));
-      } else {
-        triangle(a, c, b, noise(col, row, 8));
-        triangle(b, c, d, noise(col, row, 9));
-      }
-    }
-  }
-
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  geometry.computeVertexNormals();
-  return new THREE.Mesh(geometry, new THREE.MeshLambertMaterial({ vertexColors: true }));
 }
 
 function createHorizon() {
@@ -183,16 +109,18 @@ function scenery(world, geometries, shadowMaterial) {
   const instances = new Map();
   const transform = new THREE.Object3D();
   const shadows = [];
+  const treeBatches = [];
+  let treeTile;
 
   function part(kind, paint, x, y, z, width, height, depth, yaw = 0, rx = 0, rz = 0) {
-    const entries = instances.get(kind) || [];
-    entries.push({ paint, x, y, z, width, height, depth, yaw, rx, rz });
-    instances.set(kind, entries);
+    const key = treeTile ? `${kind}/${treeTile.x}/${treeTile.z}` : kind;
+    if (!instances.has(key)) instances.set(key, { kind, tile: treeTile, entries: [] });
+    instances.get(key).entries.push({ paint, x, y, z, width, height, depth, yaw, rx, rz });
   }
 
   function propBuilder(prop) {
     const { x, z, rotation = 0 } = prop;
-    const y = world.height(x, z) - 0.07;
+    const y = world.height(x, z) - 0.10;
     const sin = Math.sin(rotation);
     const cos = Math.cos(rotation);
     const place = (kind, paint, dx, dy, dz, width, height, depth, turn = 0, rx = 0, rz = 0) => {
@@ -205,6 +133,7 @@ function scenery(world, geometries, shadowMaterial) {
     const { x, z, scale: s = 1, kind } = prop;
     const region = typeof prop.region === 'object' ? prop.region : world.regionAt(x, z);
     const biome = region.id;
+    const architecture = region.buildingStyle;
     const rand = noise(x, z, 4);
     const stone = tone(region.stone, 0.86 + rand * 0.21);
     const leaves = tone(region.foliage, 0.76 + rand * 0.33);
@@ -213,6 +142,7 @@ function scenery(world, geometries, shadowMaterial) {
     const trunk = color(biome === 'sunscar' ? '#765440' : '#554b3c');
     const { place, y } = propBuilder(prop);
     if (kind === 'tree') {
+      treeTile = { x: Math.floor(x / 27) * 27 + 13.5, z: Math.floor(z / 27) * 27 + 13.5 };
       if (biome.includes('sunscar') || region.buildingStyle === 'desert') {
         place('trunk', trunk, 0, 1.43 * s, 0, 0.27 * s, 2.86 * s, 0.27 * s, 0.3, 0.05, -0.08);
         for (let branch = 0; branch < 6; branch += 1) {
@@ -241,6 +171,8 @@ function scenery(world, geometries, shadowMaterial) {
         place('boulder', tone(leaves, 1.24), 0.32 * s, 2.96 * s, 0, 1.44 * s, 1.45 * s, 1.35 * s, 0.45);
         if (rand < 0.28) place('rock', tone(leaves, 0.84), -0.64 * s, 2.15 * s, -0.16 * s, 1.28 * s, 1.03 * s, 0.99 * s, 0.66);
       }
+      place('treeCard', tone(leaves, .96), 0, 1.75 * s, 0, 1.21 * s, 3.5 * s, 1.21 * s, rand * Math.PI);
+      treeTile = undefined;
       shadows.push({ x, y, z, s: 1.25 * s });
     } else if (kind === 'rock') {
       place('boulder', stone, 0, 0.24 * s, 0, 1.38 * s, 0.94 * s, 1.04 * s, rand * 4, 0.2, 0.18);
@@ -261,7 +193,7 @@ function scenery(world, geometries, shadowMaterial) {
       const depth = prop.depth || 0.62 * s;
       place('box', tone(stone, 0.73), 0, height * 0.31, 0, width + 0.05, height * 0.82, depth);
       place('box', tone(stone, 0.95), 0, height * 0.7, 0, width + 0.05, height * 0.12, depth + 0.1);
-      if (world.mode === 'arena') {
+      if (world.mode !== 'frontier') {
         place('box', tone(stone, 1.12), 0, height * 0.77, 0, width + 0.1, height * 0.12, depth + 0.14);
         place('box', tone(stone, 0.62), 0, height * 0.18, 0, width + 0.02, height * 0.19, depth + 0.14);
         for (const dx of [-0.42, 0.42]) {
@@ -300,14 +232,43 @@ function scenery(world, geometries, shadowMaterial) {
       const d = prop.depth || 2.45 * s;
       const paint = tone(stone, 1.02);
       const dark = tone(stone, 0.42);
-      place('box', tone(stone, 0.68), 0, 0.12, 0, w * 1.04, 0.36, d * 1.04);
-      place('box', paint, 0, h * 0.45, 0, w, h * 1.03, d);
-      place('box', dark, 0, h * 0.24, d * 0.51, w * 0.24, h * 0.57, 0.06);
-      place('box', tone(accent, 0.73), 0, h * 0.57, d * 0.52, w * 0.31, h * 0.07, 0.09);
+      const depth = Math.max(.29, y - Math.min(world.height(x - w * .55, z - d * .55),
+        world.height(x + w * .55, z - d * .55), world.height(x - w * .55, z + d * .55),
+        world.height(x + w * .55, z + d * .55)) + .22);
+      place('box', tone(stone, 0.68), 0, .12 - depth / 2, 0, w * 1.04, depth + .23, d * 1.04);
+      const wall = WorldTuning.wallThickness;
+      const door = WorldTuning.doorWidth;
+      const sill = (w - door) / 2;
+      place('box', paint, 0, h * .48, -(d - wall) / 2, w, h * .96, wall);
+      for (const side of [-1, 1]) {
+        place('box', paint, side * (w - wall) / 2, h * .48, 0, wall, h * .96, d);
+        place('box', paint, side * (w - sill) / 2, h * .48, (d - wall) / 2, sill, h * .96, wall);
+      }
+      place('box', tone(stone, .81), 0, h * .926, (d - wall) / 2, door + .08, h * .12, wall);
+      for (let row = 0; row < 3; row++) {
+        if (noise(x, z, row + 17) > (prop.wear ?? .55)) {
+          place('box', tone(stone, .66 + row * .071), w * (row % 2 ? .26 : -.31), h * (.18 + row * .23), d * .506, w * .25, h * .039, .04);
+        }
+      }
+      place('box', tone(accent, 0.73), 0, h * .88, d * .515, door + .2, h * .07, .07);
       for (const dx of [-0.32, 0.32]) {
         place('box', dark, w * dx, h * 0.57, d * 0.51, w * 0.12, h * 0.19, 0.055);
       }
-      if (biome.includes('sunscar')) {
+      if (architecture === 'pagoda') {
+        const tile = color('#6e3b37');
+        for (let tier = 0; tier < 3; tier++) {
+          const width = 1.38 - tier * .3;
+          place('roof', tile, 0, h * (1 + tier * .22), 0, w * width, h * .27, d * width, Math.PI / 4);
+        }
+        for (const side of [-1, 1]) place('column', accent, w * .38 * side, h * .48, d * .51, .13, h, .13);
+      } else if (architecture === 'megalith') {
+        place('boulder', tone(stone, 1.04), 0, h * 1.03, 0, w * 1.36, h * .63, d * 1.42, .19);
+        for (const side of [-1, 1]) place('rock', stone, w * .43 * side, h * .48, d * .54, .45, h, .45, .8);
+      } else if (architecture === 'concrete') {
+        place('box', tone(stone, .81), -w * .1, h, 0, w * .91, h * .16, d * 1.04);
+        place('box', tone(stone, .52), w * .25, h * .91, 0, w * .31, h * .12, d * .96, 0, .08, -.13);
+        for (const side of [-1,1]) place('box', dark, w * .502 * side, h * .65, 0, .04, h * .23, d * .58);
+      } else if (biome.includes('sunscar')) {
         place('box', tone(stone, 1.22), 0, h, 0, w * 1.12, h * 0.17, d * 1.12);
         place('box', tone(stone, 0.81), 0, h * 1.13, 0, w * 0.62, h * 0.16, d * 0.61);
         place('column', tone(accent, 0.73), -w * 0.29, h * 0.48, d * 0.62, 0.21, h, 0.21);
@@ -344,7 +305,7 @@ function scenery(world, geometries, shadowMaterial) {
     }
   }
 
-  if (world.mode === 'arena') {
+  if (world.mode !== 'frontier') {
     const sand = new THREE.MeshBasicMaterial({ color: '#ad8b4c', opacity: 0.51, transparent: true, side: THREE.DoubleSide, depthWrite: false });
     const rings = [[4.04, 4.12, 72], [1.08, 1.21, 4]];
     for (const [inside, outside, sides] of rings) {
@@ -359,8 +320,8 @@ function scenery(world, geometries, shadowMaterial) {
     }
   }
 
-  for (const [kind, entries] of instances) {
-    const material = new THREE.MeshLambertMaterial();
+  for (const { kind, entries, tile } of instances.values()) {
+    const material = new THREE.MeshLambertMaterial({ side: kind === 'treeCard' ? THREE.DoubleSide : THREE.FrontSide });
     const batch = new THREE.InstancedMesh(geometries[kind], material, entries.length);
     for (let i = 0; i < entries.length; i += 1) {
       const entry = entries[i];
@@ -373,6 +334,7 @@ function scenery(world, geometries, shadowMaterial) {
     }
     batch.computeBoundingSphere();
     group.add(batch);
+    if (tile) treeBatches.push({ batch, tile, distant: kind === 'treeCard' });
   }
 
   if (shadows.length) {
@@ -388,7 +350,16 @@ function scenery(world, geometries, shadowMaterial) {
     group.add(mesh);
   }
 
-  return group;
+  return {
+    group,
+    update(player, quality) {
+      const near = { low: 21, medium: 34, high: 49, ultra: 72 }[quality] ?? 34;
+      for (const { batch, tile, distant } of treeBatches) {
+        const gap = Math.hypot(player.x - tile.x, player.z - tile.z);
+        batch.visible = distant ? gap >= near && gap < 136 : gap < near;
+      }
+    },
+  };
 }
 
 function backdrop(world, geometries) {
@@ -452,7 +423,9 @@ function luminous(paint) {
 function makeActorRig(geometries, region, team, arena, shadowMaterial) {
   const root = new THREE.Group();
   const body = new THREE.Group();
+  const limbs = new THREE.Group();
   root.add(body);
+  body.add(limbs);
   const cloth = lambert(arena ? (team === 0 ? '#456b65' : '#994b3d') : region.cloth);
   const trim = lambert(arena ? (team === 0 ? '#83b7a6' : '#eca16c') : region.accent);
   const armor = lambert(region.armor);
@@ -522,15 +495,15 @@ function makeActorRig(geometries, region, team, arena, shadowMaterial) {
     hideInFirstPerson.push(leg);
     legs.push(leg);
 
-    const top = meshPart(body, box, armor, 0, 0, 0, 1, 1, 1);
-    const bottom = meshPart(body, box, cloth, 0, 0, 0, 1, 1, 1);
-    const hand = meshPart(body, box, leather, 0, 0, 0, 0.15, 0.16, 0.13);
+    const top = meshPart(limbs, box, armor, 0, 0, 0, 1, 1, 1);
+    const bottom = meshPart(limbs, box, cloth, 0, 0, 0, 1, 1, 1);
+    const hand = meshPart(limbs, box, leather, 0, 0, 0, 0.15, 0.16, 0.13);
     const shoulder = staticPart(geometries.boulder, armor, side * 0.394, 1.535, 0.01, 0.33, 0.3, 0.39);
     arms.push({ top, bottom, hand, shoulder });
   }
 
   const weapons = new THREE.Group();
-  body.add(weapons);
+  limbs.add(weapons);
   const shadow = new THREE.Mesh(geometries.shadows, shadowMaterial);
   shadow.scale.set(0.58, 1, 0.66);
   shadow.position.y = 0.036;
@@ -554,9 +527,9 @@ function makeActorRig(geometries, region, team, arena, shadowMaterial) {
   }
   trails.geometry.setIndex(trailIndices);
   trails.frustumCulled = false;
-  root.add(trails);
+  limbs.add(trails);
 
-  return { root, body, cape, arms, legs, weapons, weaponId: null, helm, healthBg, healthFg, trails, hideInFirstPerson, health: null, initial: true, stepPhase: 0 };
+  return { root, body, limbs, cape, arms, legs, weapons, weaponId: null, helm, healthBg, healthFg, trails, hideInFirstPerson, health: null, initial: true, stepPhase: 0 };
 }
 
 function makeWeapon(parent, geometries, weapon) {
@@ -587,21 +560,56 @@ function makeWeapon(parent, geometries, weapon) {
 
 function swordLength(weapon) {
   if (weapon.id === 'steel-longsword') return 1.64;
+  if (weapon.id === 'knight-dagger') return 0.47;
   return weapon.id === 'plasma-blade' ? 1.37 : 1.05;
+}
+
+function mountKnight(rig, model) {
+  const piece = (name, parent) => {
+    const group = model.getObjectByName(name).clone(true);
+    parent.add(group);
+    return group;
+  };
+  for (const part of rig.hideInFirstPerson) part.visible = false;
+  const armor = piece('body', rig.body);
+  const helmet = piece('helm', rig.body);
+  const sheath = piece('sheath', rig.body);
+  sheath.position.set(0.28, 1.03, -0.14);
+  sheath.rotation.z = 2.85;
+  const cape = piece('cape', rig.body);
+  cape.position.set(0, 1.58, -0.115);
+  rig.cape = cape;
+
+  for (const [index, arm] of rig.arms.entries()) {
+    const side = index === 0 ? 'positive' : 'negative';
+    for (const part of [arm.top, arm.bottom, arm.hand]) part.removeFromParent();
+    arm.top = piece(`upper-${side}`, rig.limbs);
+    arm.bottom = piece(`forearm-${side}`, rig.limbs);
+    arm.hand = piece(`hand-${side}`, rig.limbs);
+  }
+  for (const [index, leg] of rig.legs.entries()) {
+    leg.clear();
+    piece(index === 0 ? 'leg-negative' : 'leg-positive', leg);
+  }
+  rig.shield = piece('shield', rig.limbs);
+  rig.hideInFirstPerson = [armor, helmet, sheath, cape, ...rig.legs];
+  rig.knight = true;
+  rig.weaponId = null;
 }
 
 function sampleSwing(progress, direction, wrist, blade) {
   const angle = (progress - 0.5) * Math.PI;
+  // Sine follows the swipe in the view plane, while cosine carries the blade through contact.
   const travel = Math.sin(angle);
   const forward = Math.cos(angle);
   wrist.set(
-    0.29 + direction.x * 0.59 * travel,
-    1.38 + direction.y * 0.48 * travel + forward * 0.08,
+    0.29 + direction.x * 0.55 * travel,
+    1.38 + direction.y * 0.55 * travel + forward * 0.08,
     0.17 + forward * 0.61,
   );
   blade.set(
-    direction.x * 0.9 * travel + (1 - Math.abs(direction.x)) * 0.14,
-    direction.y * 0.52 * travel + 0.14,
+    direction.x * 0.75 * travel + (1 - Math.abs(direction.x)) * 0.14,
+    direction.y * 0.75 * travel + 0.14,
     0.78 + forward * 0.4,
   );
 }
@@ -654,24 +662,19 @@ function poseActor(rig, actor, world, weapon, dt, firstPerson) {
   rig.cape.rotation.x = -speed * 0.42 - stride * 0.15;
   rig.root.visible = actor.alive !== false && actor.health > 0;
 
-  const phase = actor.swing;
-  const active = phase >= 0;
-  const impactStart = weapon.windup / (weapon.windup + weapon.swing + weapon.recovery);
-  const impactEnd = (weapon.windup + weapon.swing) / (weapon.windup + weapon.swing + weapon.recovery);
-  const swingProgress = clamp((phase - impactStart) / (impactEnd - impactStart), 0, 1);
-  const preparation = clamp(phase / impactStart, 0, 1);
-  const settle = clamp((phase - impactEnd) / (1 - impactEnd), 0, 1);
+  const { phase, elapsed, gesture: swipe } = actor.combat;
+  const active = phase === AttackPhase.ACTIVE_SWING;
+  const swingProgress = active ? clamp(elapsed / weapon.swing, 0, 1) : Number(phase === AttackPhase.RECOVERY);
   const aimX = actor.aimX || 0;
   const aimY = actor.aimY || 0;
-  gesture.set(actor.swingX || 0, actor.swingY || 0);
-  if (gesture.lengthSq() < 0.0001) gesture.set(0, -1);
-  else gesture.normalize();
   let handX = 0.48 + aimX * 0.22;
   let handY = 1.25 + aimY * 0.36;
   let handZ = 0.36 + stride * 0.055;
   bladeDirection.set(aimX * 0.56 + 0.17, 0.85 + aimY * 0.55, 0.48);
-  if (active) {
-    const weight = preparation * (1 - settle);
+  if (isSwinging(actor.combat)) {
+    gesture.set(swipe.x, swipe.y);
+    const weight = phase === AttackPhase.WINDUP ? elapsed / weapon.windup
+      : phase === AttackPhase.RECOVERY ? 1 - elapsed / weapon.recovery : 1;
     sampleSwing(swingProgress, gesture, swingWrist, swingBlade);
     handX = mixes(handX, swingWrist.x, weight);
     handY = mixes(handY, swingWrist.y, weight);
@@ -709,15 +712,21 @@ function poseActor(rig, actor, world, weapon, dt, firstPerson) {
   rig.weapons.position.set(-handX, handY, handZ);
   bladeDirection.x *= -1;
   rig.weapons.quaternion.setFromUnitVectors(UP, bladeDirection.normalize());
+  if (rig.shield) {
+    const guard = actor.guarding;
+    rig.shield.position.set(guard ? 0.29 : 0.51, (guard ? 1.38 : 1.02) + (guard ? aimY * 0.15 : stride * 0.035), guard ? 0.62 : 0.33);
+    rig.shield.rotation.set(guard ? -0.16 : 0.16, guard ? -0.1 : -0.65, guard ? -0.18 : -0.24);
+  }
   rig.hideInFirstPerson.forEach((part) => { part.visible = !firstPerson; });
 
   const ratio = clamp(actor.health / actor.maxHealth, 0, 1);
   rig.healthFg.scale.x = ratio * 0.66;
   rig.healthFg.position.x = (ratio - 1) * 0.33;
-  drawTrail(rig, weapon, active, swingProgress, gesture, bob);
+  drawTrail(rig, weapon, active, swingProgress, gesture);
+  return bob;
 }
 
-function drawTrail(rig, weapon, active, progress, direction, bob) {
+function drawTrail(rig, weapon, active, progress, direction) {
   const visible = active && progress > 0 && progress < 1;
   rig.trails.visible = visible;
   if (!visible) return;
@@ -725,7 +734,8 @@ function drawTrail(rig, weapon, active, progress, direction, bob) {
   const positions = rig.trails.geometry.getAttribute('position');
   const start = Math.max(0, progress - 0.29);
   const axe = weapon.id === 'iron-axe';
-  const tipLength = axe ? 1.43 : 0.24 + swordLength(weapon) * 1.045;
+  const tipLength = axe ? 1.43 : rig.knight && weapon.id === 'steel-longsword' ? 1.92
+    : rig.knight && weapon.id === 'knight-dagger' ? 0.56 : 0.24 + swordLength(weapon) * 1.045;
   const tipSide = axe ? 0.515 : 0;
 
   rig.trails.material.opacity = (1 - Math.abs(0.51 - progress) * 1.72) * 0.48;
@@ -739,7 +749,7 @@ function drawTrail(rig, weapon, active, progress, direction, bob) {
       trailTip.set(tipSide, tipLength - edge * 0.17, 0).applyQuaternion(trailRotation);
       positions.setXYZ(strip * 2 + edge,
         -trailWrist.x + trailTip.x,
-        trailWrist.y + trailTip.y + bob,
+        trailWrist.y + trailTip.y,
         trailWrist.z + trailTip.z,
       );
     }
@@ -753,6 +763,17 @@ function makeCoreRig(core, region, geometries) {
   const trim = lambert(tone(region.stone, 1.19));
   const light = luminous(region.accent);
   const rare = lambert(tone(region.accent, 0.82));
+  if (['sandstone', 'pagoda'].includes(region.buildingStyle)) {
+    for (const side of [-1, 1]) {
+      meshPart(root, geometries.column, trim, side * .72, .82, -.49, .17, 1.54, .17);
+    }
+    meshPart(root, geometries.roof, rare, 0, 1.81, -.49, 1.65, .34, .66);
+  } else if (region.buildingStyle === 'megalith') {
+    meshPart(root, geometries.boulder, stone, 0, 1.06, -.59, 1.26, 2.24, .47, -.13);
+  } else if (['steel', 'concrete', 'alloy'].includes(region.buildingStyle)) {
+    meshPart(root, geometries.box, trim, 0, .59, -.48, 1.57, .92, .41);
+    meshPart(root, geometries.box, light, 0, .71, -.247, 1.46, .08, .025);
+  }
   meshPart(root, geometries.column, stone, 0, 0.16, 0, 2.46, 0.47, 2.46);
   meshPart(root, geometries.column, trim, 0, 0.44, 0, 2.13, 0.2, 2.13);
   meshPart(root, geometries.column, stone, 0, 0.63, 0, 1.68, 0.22, 1.68);
@@ -841,12 +862,13 @@ function createParticles(geometries) {
 }
 
 function worldTint(world) {
-  if (world.mode === 'arena') return '#c2a87d';
   const id = world.spawns[0]?.region?.id;
-  if (id === 'frostfall') return '#9cabaa';
-  if (id === 'sunscar') return '#c4a681';
-  if (id === 'glassreach') return '#a49eaa';
-  return '#a6b09a';
+  if (id === 'frostfall') return '#a4a39e';
+  if (id === 'sunscar') return '#cfa378';
+  if (id === 'glassreach') return '#a59caf';
+  if (id === 'redcanopy') return '#b89584';
+  if (id === 'ashline') return '#aca793';
+  return '#b8a17e';
 }
 
 function cameraBlockers(world) {
@@ -898,15 +920,27 @@ export function createRenderer(canvas) {
   scene.add(sky);
   const light = new THREE.DirectionalLight('#fff0cf', 1.96);
   light.position.set(-22, 27, 16);
-  scene.add(light, new THREE.HemisphereLight('#e9eee1', '#75624e', 1.36));
+  const ambient = new THREE.HemisphereLight('#e9eee1', '#75624e', 1.36);
+  scene.add(light, ambient);
   const camera = new THREE.PerspectiveCamera(61, 16 / 9, 0.06, 280);
   camera.position.set(0, 27, -20);
   camera.lookAt(0, 0, 0);
+  const viewModelScene = new THREE.Scene();
+  const viewModelCamera = new THREE.PerspectiveCamera(64, 16 / 9, 0.04, 8);
+  viewModelScene.add(light.clone(), ambient.clone());
   const geometries = createGeometries();
   const shadowTexture = softShadowTexture();
   const shadowMaterial = new THREE.MeshBasicMaterial({ color: '#161f1c', map: shadowTexture, opacity: 0.27, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2 });
   const sharedGeometries = new Set(Object.values(geometries));
   const sharedMaterials = new Set([shadowMaterial]);
+  let knightModel;
+  loadKnight().then((model) => {
+    knightModel = model;
+    model.traverse((part) => {
+      if (part.geometry) sharedGeometries.add(part.geometry);
+      if (part.material) sharedMaterials.add(part.material);
+    });
+  }).catch((error) => console.warn('Knight model unavailable', error));
   const particles = createParticles(geometries);
   scene.add(particles.mesh);
   const sceneryRoot = new THREE.Group();
@@ -923,6 +957,10 @@ export function createRenderer(canvas) {
   const rigRotation = new THREE.Quaternion();
   const regions = new Map();
   let world = null;
+  let terrainView;
+  let sceneryView;
+  let quality = 'medium';
+  let detailedChunks = 0;
   let blockers = [];
   let cameraInitialized = false;
   let lastFirstPerson = false;
@@ -930,8 +968,28 @@ export function createRenderer(canvas) {
   let lastHeight = 0;
   let lastEvent = null;
   let elapsed = 0;
+  let viewModelRig = null;
+
+  function setViewModel(rig) {
+    if (viewModelRig === rig) return;
+    if (viewModelRig) {
+      const { body, limbs } = viewModelRig;
+      body.add(limbs);
+      limbs.position.set(0, 0, 0);
+      limbs.rotation.y = 0;
+      limbs.scale.setScalar(1);
+    }
+    viewModelRig = rig;
+    if (rig) {
+      // Both views share the gesture pose and trail. The camera-space arms stay clear of terrain.
+      viewModelScene.add(rig.limbs);
+      rig.limbs.rotation.y = Math.PI;
+      rig.limbs.scale.setScalar(VIEW_MODEL_SCALE);
+    }
+  }
 
   function setWorld(next) {
+    setViewModel(null);
     cleanGroup(sceneryRoot, sharedGeometries, sharedMaterials);
     cleanGroup(actorsRoot, sharedGeometries, sharedMaterials);
     actors.clear();
@@ -946,13 +1004,15 @@ export function createRenderer(canvas) {
     lastEvent = null;
     elapsed = 0;
     const tint = worldTint(world);
-    const arena = world.mode === 'arena';
+    const arena = world.mode !== 'frontier';
     scene.fog.color.set(tint);
     scene.fog.near = arena ? 17 : 26;
     scene.fog.far = arena ? 76 : 117;
     sky.material.uniforms.haze.value.set(tint);
-    sky.material.uniforms.zenith.value.set(arena ? '#7a8f88' : '#496e79');
-    sceneryRoot.add(createTerrain(world), scenery(world, geometries, shadowMaterial), backdrop(world, geometries));
+    sky.material.uniforms.zenith.value.set(arena ? '#826d64' : '#66585b');
+    terrainView = createTerrainView(world);
+    sceneryView = scenery(world, geometries, shadowMaterial);
+    sceneryRoot.add(terrainView.group, sceneryView.group, backdrop(world, geometries));
   }
 
   function resize() {
@@ -964,6 +1024,8 @@ export function createRenderer(canvas) {
       lastHeight = height;
       camera.aspect = width / height;
       camera.updateProjectionMatrix();
+      viewModelCamera.aspect = camera.aspect;
+      viewModelCamera.updateProjectionMatrix();
       graphics.setSize(width, height, false);
     }
     return true;
@@ -977,17 +1039,19 @@ export function createRenderer(canvas) {
     const pitch = clamp(view.pitch ?? -0.18, -0.93, 0.67);
     const directionX = Math.sin(yaw);
     const directionZ = Math.cos(yaw);
-    const swingX = actor.swingX || 0;
-    const swingY = actor.swingY || 0;
+    const { phase, elapsed: phaseTime, gesture: swipe } = actor.combat;
+    const swingX = swipe?.x ?? 0;
+    const swingY = swipe?.y ?? 0;
     const firstPerson = Boolean(view.firstPerson);
-    const power = actor.swing < 0 ? 0 : Math.sin(actor.swing * Math.PI) ** 2 * weapon.weight;
-    const jitter = Math.sin(time * 10.6) * 0.014 * Math.min(1, (actor.speed || 0) / 7);
+    const recoil = phase === AttackPhase.ACTIVE_SWING ? Math.sin((phaseTime / weapon.swing) * Math.PI) ** 2 : 0;
+    const power = view.reducedMotion ? 0 : recoil * weapon.weight * (firstPerson ? 0.22 : 0.4);
+    const jitter = view.reducedMotion ? 0 : Math.sin(time * 10.6) * 0.014 * Math.min(1, (actor.speed || 0) / 7);
     if (firstPerson) {
       cameraDesired.set(x + directionX * 0.11, y + 1.985 + jitter, z + directionZ * 0.11);
       const rise = Math.sin(pitch + swingY * power * 0.016);
       cameraTarget.set(x + (directionX * 8 - directionZ * power * 0.086 * swingX) * Math.cos(pitch), y + 1.985 + rise * 8 + jitter, z + (directionZ * 8 + directionX * power * 0.086 * swingX) * Math.cos(pitch));
     } else {
-      const distance = world.mode === 'arena' ? 6.55 : 7.55;
+      const distance = world.mode === 'frontier' ? 7.55 : 6.55;
       const horizontal = distance * Math.cos(pitch);
       const shoulder = 0.72 + power * swingX * 0.061;
       cameraDesired.set(x - directionX * horizontal - directionZ * shoulder, y + 2.48 - Math.sin(pitch) * distance + jitter * 0.5, z - directionZ * horizontal + directionX * shoulder);
@@ -1003,7 +1067,7 @@ export function createRenderer(canvas) {
         }
       }
       cameraDesired.y = Math.max(cameraDesired.y, world.height(cameraDesired.x, cameraDesired.z) + 0.72);
-      const ahead = world.mode === 'arena' ? 3.1 : 4.5;
+      const ahead = world.mode === 'frontier' ? 4.5 : 3.1;
       cameraTarget.set(
         x + directionX * ahead - directionZ * 0.39,
         y + 1.31 + Math.sin(pitch) * 2.36 + swingY * power * 0.069,
@@ -1039,28 +1103,47 @@ export function createRenderer(canvas) {
     const player = members.find((actor) => actor.id === view.actorId) || game.player;
     if (!player) return;
     const ownWeapon = getWeapon(player.weaponId);
+    detailedChunks = terrainView.update(player, quality);
+    sceneryView.update(player, quality);
     positionCamera(player, view, dt, ownWeapon);
 
     for (const member of members) {
       let rig = actors.get(member.id);
       if (!rig) {
         const region = regions.get(member.regionId) || world.regionAt(member.x, member.z);
-        rig = makeActorRig(geometries, region, member.team, world.mode === 'arena', shadowMaterial);
+        rig = makeActorRig(geometries, region, member.team, world.mode !== 'frontier', shadowMaterial);
+        if (member.drill) {
+          const board = meshPart(rig.body, geometries.column, lambert(member.drill === 'fixed' ? '#c29a5f' : '#997847'),
+            0, 1.35, .27, .68, .13, .68);
+          board.rotation.x = Math.PI / 2;
+          const bullseye = meshPart(rig.body, geometries.column, lambert('#b35d46'), 0, 1.35, .35, .37, .03, .37);
+          bullseye.rotation.x = Math.PI / 2;
+          const mark = meshPart(rig.body, geometries.column, lambert('#eace9a'), 0, 1.35, .374, .17, .022, .17);
+          mark.rotation.x = Math.PI / 2;
+        }
         actorsRoot.add(rig.root);
         actors.set(member.id, rig);
       }
       const own = member.id === player.id;
       const weapon = own ? ownWeapon : getWeapon(member.weaponId);
+      if (member.avatar === 'knight' && knightModel && !rig.knight) mountKnight(rig, knightModel);
       if (rig.weaponId !== weapon.id) {
         cleanGroup(rig.weapons, sharedGeometries, sharedMaterials);
-        makeWeapon(rig.weapons, geometries, weapon);
+        const modelPart = weapon.id === 'steel-longsword' ? 'sword' : weapon.id === 'knight-dagger' ? 'dagger' : null;
+        if (rig.knight && modelPart) rig.weapons.add(knightModel.getObjectByName(modelPart).clone(true));
+        else if (!member.drill) makeWeapon(rig.weapons, geometries, weapon);
         rig.weaponId = weapon.id;
       }
       if (rig.health !== null && member.health < rig.health) {
         particles.impact(member.x, world.height(member.x, member.z) + 1.16, member.z, color('#ffe3a1'), member.health > 0 ? 8 : 14);
       }
       rig.health = member.health;
-      poseActor(rig, member, world, weapon, dt, own && view.firstPerson);
+      const firstPerson = own && view.firstPerson;
+      const bob = poseActor(rig, member, world, weapon, dt, firstPerson);
+      if (own) {
+        setViewModel(firstPerson && member.alive ? rig : null);
+        if (viewModelRig) rig.limbs.position.set(-0.05, -1.83 * VIEW_MODEL_SCALE + (view.reducedMotion ? 0 : bob * 0.26), -0.48);
+      }
       const gap = Math.hypot(member.x - player.x, member.z - player.z);
       rig.helm.visible = !own && gap < 17;
       if (rig.helm.visible) faceCamera(rig.root, rig.helm);
@@ -1115,9 +1198,16 @@ export function createRenderer(canvas) {
 
     particles.update(dt);
     graphics.render(scene, camera);
+    if (viewModelRig) {
+      graphics.autoClear = false;
+      graphics.clearDepth();
+      graphics.render(viewModelScene, viewModelCamera);
+      graphics.autoClear = true;
+    }
   }
 
   function dispose() {
+    setViewModel(null);
     cleanGroup(sceneryRoot, sharedGeometries, sharedMaterials);
     cleanGroup(actorsRoot, sharedGeometries, sharedMaterials);
     sky.geometry.dispose();
@@ -1130,7 +1220,18 @@ export function createRenderer(canvas) {
     graphics.dispose();
   }
 
-  return { setWorld, draw, dispose };
+  function setQuality(preset, resolutionScale = 1) {
+    quality = preset;
+    const limit = { low: .82, medium: 1.18, high: 1.5, ultra: 1.9 }[preset] ?? 1.18;
+    graphics.setPixelRatio(Math.min(globalThis.devicePixelRatio || 1, limit) * resolutionScale);
+    lastWidth = 0;
+  }
+
+  function stats() {
+    return { chunks: terrainView?.count ?? 0, detailedChunks, props: world?.props.length ?? 0 };
+  }
+
+  return { setWorld, draw, setQuality, stats, dispose };
 }
 
 const cameraCollisionTarget = new THREE.Vector3();

@@ -1,8 +1,11 @@
+import { AttackPhase, CombatTuning, advanceCombat, createCombatState, isSwinging, makeFlick } from './combat.js';
+
 export const WEAPONS = Object.freeze([
   { id: 'bronze-sword', name: 'Bronze Sword', era: 'Bronze Age', weight: 1.3, damage: 24, reach: 2.85, windup: 0.17, swing: 0.24, recovery: 0.26, stamina: 17, color: '#ddad6b', description: 'Quick strikes with a short reach.' },
   { id: 'iron-axe', name: 'Iron Axe', era: 'Iron Age', weight: 3.2, damage: 39, reach: 3.05, windup: 0.30, swing: 0.30, recovery: 0.43, stamina: 27, color: '#a4afbb', description: 'A heavy swing with high impact.' },
   { id: 'steel-longsword', name: 'Steel Longsword', era: 'Medieval', weight: 2.1, damage: 31, reach: 3.45, windup: 0.24, swing: 0.25, recovery: 0.34, stamina: 22, color: '#d4def0', description: 'A long reach with a measured swing.' },
   { id: 'plasma-blade', name: 'Plasma Blade', era: 'Future', weight: 0.8, damage: 26, reach: 3.05, windup: 0.14, swing: 0.21, recovery: 0.32, stamina: 20, color: '#73eed6', description: 'A light blade that follows the mouse closely.' },
+  { id: 'knight-dagger', name: 'Knight’s Dagger', era: 'Medieval', weight: 0.62, damage: 16, reach: 1.85, windup: 0.12, swing: 0.18, recovery: 0.20, stamina: 11, color: '#d4cfb8', description: 'An agile close-range blade.' },
 ].map(Object.freeze));
 
 const WEAPON_BY_ID = new Map(WEAPONS.map((weapon) => [weapon.id, weapon]));
@@ -47,26 +50,37 @@ function makeActor(id, team, spawn, weaponId, region, name) {
     spawn: { x: spawn.x, z: spawn.z, facing },
     health: 100, maxHealth: 100, stamina: 100, maxStamina: 100,
     alive: true, guarding: false, aimX: 0.65, aimY: 0.15, speed: 0,
-    swing: -1, swingX: 0, swingY: 0, attack: null, regenDelay: 0,
+    combat: createCombatState(), regenDelay: 0,
     weaponId, inventory: [weaponId], respawnAt: 0, attackAt: 0, routeAt: 0,
     route: [], routeGoal: null, approachSide: team % 2 ? -1 : 1,
   };
 }
 
-export function createGame(world, { arenaWeapon, versus } = {}) {
+export function createGame(world, { arenaWeapon, startingWeapon = 'steel-longsword', versus } = {}) {
   const arena = world.mode === 'arena';
+  const training = world.mode === 'training';
   const game = {
     world, actors: [], cores: [], pickups: [], events: [], status: 'playing', time: 0,
     player: null, rival: null, versus: arena && (versus === 'online' || versus === true) ? 'online' : 'bot',
     randomState: seedValue(world.seed),
+    training: training ? { swings: 0, fixedHits: 0, movingHits: 0, combos: 0 } : null,
   };
 
   world.spawns.forEach((spawn, index) => {
     const fort = world.forts[index];
     const region = spawn.region || fort?.region || world.regionAt(spawn.x, spawn.z);
-    const weapon = getWeapon(arena ? arenaWeapon : REGION_WEAPON[regionId(region)]);
-    const name = index === 0 ? 'You' : arena ? 'Challenger' : `${region?.faction || 'Frontier'} Guard`;
-    game.actors.push(makeActor(index === 0 ? 'player' : `rival-${index}`, index, spawn, weapon.id, region, name));
+    const human = index === 0 || (arena && game.versus === 'online');
+    const weapon = getWeapon(arena ? arenaWeapon : human ? startingWeapon : REGION_WEAPON[regionId(region)]);
+    const name = index === 0 ? 'You' : spawn.drill ? (spawn.drill === 'fixed' ? 'Fixed target' : 'Moving target')
+      : arena ? 'Challenger' : `${region?.faction || 'Frontier'} Guard`;
+    const actor = makeActor(index === 0 ? 'player' : `rival-${index}`, index, spawn, weapon.id, region, name);
+    if (human) actor.avatar = 'knight';
+    if (spawn.drill) actor.drill = spawn.drill;
+    if (human && !arena) {
+      const gear = training ? WEAPONS.map(({ id }) => id) : ['steel-longsword', 'knight-dagger'];
+      actor.inventory = [...new Set([weapon.id, ...gear])];
+    }
+    game.actors.push(actor);
   });
   game.player = game.actors[0];
   game.rival = arena ? game.actors[1] : null;
@@ -81,7 +95,7 @@ export function createGame(world, { arenaWeapon, versus } = {}) {
   world.props.forEach((prop, index) => {
     if (prop.kind !== 'pickup') return;
     const item = prop.item || 'weapon';
-    const weapon = item === 'weapon' ? WEAPONS[Math.floor(random(game) * WEAPONS.length)] : null;
+    const weapon = item === 'weapon' ? (prop.weaponId ? getWeapon(prop.weaponId) : WEAPONS[Math.floor(random(game) * WEAPONS.length)]) : null;
     game.pickups.push({
       id: prop.id || `pickup-${index}`, x: prop.x, z: prop.z, item,
       weaponId: weapon?.id, available: true,
@@ -94,7 +108,7 @@ export function createGame(world, { arenaWeapon, versus } = {}) {
 export function equipWeapon(game, index) {
   const player = game.player;
   const weaponId = player.inventory[index];
-  if (!player.alive || player.attack || !weaponId || game.world.mode === 'arena') return false;
+  if (!player.alive || player.combat.phase !== AttackPhase.IDLE || !weaponId || game.world.mode === 'arena') return false;
   player.weaponId = weaponId;
   return true;
 }
@@ -222,7 +236,8 @@ function getAiInput(game, actor) {
   let moveZ = 0;
   let facing = fighting ? heading(actor, target) : actor.spawn.facing;
   let attack = false;
-  const guard = arena && player.attack && playerDistance < 4.2 && !actor.attack && actor.stamina > 24
+  const swinging = isSwinging(actor.combat);
+  const guard = arena && isSwinging(player.combat) && playerDistance < 4.2 && !swinging && actor.stamina > 24
     && Math.sin(game.time * 3.1 + actor.team) > -0.2;
 
   if (spacing > (fighting ? weapon.reach * 0.75 : 1.05) || (fighting && !targetVisible)) {
@@ -230,21 +245,32 @@ function getAiInput(game, actor) {
     moveX = Math.sin(direction);
     moveZ = Math.cos(direction);
     if (!reachable || !targetVisible) facing = direction;
-  } else if (arena && spacing > 1.1 && !actor.attack) {
+  } else if (arena && spacing > 1.1 && !swinging) {
     moveX = Math.cos(facing) * actor.approachSide * 0.43;
     moveZ = -Math.sin(facing) * actor.approachSide * 0.43;
   }
 
-  if (fighting && reachable && targetVisible && !guard && !actor.attack && game.time >= actor.attackAt) {
+  if (fighting && reachable && targetVisible && !guard && actor.combat.phase === AttackPhase.IDLE && game.time >= actor.attackAt) {
     attack = true;
     actor.attackAt = game.time + 0.65 + random(game) * 0.62;
     if (random(game) > 0.54) actor.approachSide *= -1;
   }
 
-  return {
-    moveX, moveZ, facing, attack, guard, aimX: guard ? player.swingX : actor.approachSide * 0.8,
-    aimY: guard ? -player.swingY : Math.sin(game.time * 1.8) * 0.45,
-  };
+  const aimX = guard ? player.combat.gesture.x : actor.approachSide * 0.8;
+  const aimY = guard ? -player.combat.gesture.y : Math.sin(game.time * 1.8) * 0.45;
+  const gesture = attack ? makeFlick(aimX, aimY, CombatTuning.MinFlickVelocity) : null;
+  return { moveX, moveZ, facing, gesture, guard, aimX, aimY };
+}
+
+function getTrainingInput(game, actor) {
+  if (actor.drill === 'fixed') return EMPTY_INPUT;
+  const facing = heading(actor, game.player);
+  // Predictable strafes let players track a route and make small corrections before a flick.
+  const fast = actor.drill === 'quick';
+  const phase = game.time * (fast ? 1.55 : 0.82) + actor.team;
+  const targetX = actor.spawn.x + Math.sin(phase) * (fast ? 2.45 : 1.45);
+  const targetZ = actor.spawn.z + Math.sin(phase * 0.5) * (fast ? 0.45 : 0.2);
+  return { facing, moveX: clamp((targetX - actor.x) * 0.62, -0.68, 0.68), moveZ: clamp((targetZ - actor.z) * 0.6, -0.4, 0.4) };
 }
 
 function moveActor(game, actor, input, dt, sprint) {
@@ -260,7 +286,7 @@ function moveActor(game, actor, input, dt, sprint) {
     z /= magnitude;
   }
 
-  const speed = sprint ? 8.7 : actor.guarding ? 3.2 : actor.attack ? 4.25 : 6.3;
+  const speed = sprint ? 8.7 : actor.guarding ? 3.2 : isSwinging(actor.combat) ? 4.25 : 6.3;
   const startX = actor.x;
   const startZ = actor.z;
   const nextX = startX + x * speed * dt;
@@ -281,21 +307,26 @@ function moveActor(game, actor, input, dt, sprint) {
   actor.speed = Math.hypot(actor.x - startX, actor.z - startZ) / dt;
 }
 
-function inStrike(game, actor, target, radius, weapon, endClearance = 0) {
+function inStrike(game, actor, target, radius, weapon, gesture, endClearance = 0) {
   const range = distance(actor, target);
   if (range > weapon.reach + radius) return false;
-  const strikeAngle = actor.facing - actor.swingX * 0.26;
+  const side = gesture.direction === 'RIGHT' ? 1 : gesture.direction === 'LEFT' ? -1 : 0;
+  const strikeAngle = actor.facing - side * 0.26;
   const angle = heading(actor, target) - strikeAngle;
   return (range < 0.95 || Math.cos(angle) > 0.35) && lineClear(game.world, actor, target, endClearance);
 }
 
-function damageActor(game, attacker, target, weapon) {
+function damageActor(game, attacker, target, weapon, gesture) {
   const facingAttack = Math.cos(heading(target, attacker) - target.facing) > 0.25;
   const blocked = target.guarding && facingAttack && target.stamina >= 10;
-  const directional = Math.hypot(target.aimX - attacker.swingX, target.aimY + attacker.swingY) < 0.88;
+  const directional = Math.hypot(target.aimX - gesture.x, target.aimY + gesture.y) < 0.88;
   const damage = blocked ? Math.round(weapon.damage * (directional ? 0.12 : 0.36)) : weapon.damage;
   target.health = Math.max(0, target.health - damage);
   const details = { actorId: attacker.id, targetId: target.id, damage, directional };
+  if (game.training && attacker === game.player && target.drill) {
+    if (target.drill === 'fixed') game.training.fixedHits++;
+    else game.training.movingHits++;
+  }
   if (blocked) {
     target.stamina = Math.max(0, target.stamina - (directional ? 10 : 19));
     target.regenDelay = 0.5;
@@ -308,10 +339,9 @@ function downActor(game, target, attackerId) {
   if (!target.alive) return;
   target.alive = false;
   target.speed = 0;
-  target.swing = -1;
-  target.attack = null;
+  target.combat = { ...createCombatState(), swingId: target.combat.swingId };
   target.guarding = false;
-  target.respawnAt = game.time + 2.5;
+  target.respawnAt = game.time + (target.drill ? 1 : 2.5);
   emit(game, 'actor-down', target, { actorId: target.id, attackerId });
 }
 
@@ -325,35 +355,22 @@ function damageCore(game, attacker, core, weapon) {
   emit(game, 'core-destroyed', core, { actorId: attacker.id, targetId: core.id, team: core.team });
 }
 
-function connectStrike(game, actor, weapon) {
+function connectStrike(game, actor, weapon, gesture) {
   for (const target of game.actors) {
-    if (target.team !== actor.team && target.alive && inStrike(game, actor, target, ACTOR_RADIUS, weapon)) {
-      damageActor(game, actor, target, weapon);
+    if (target.team !== actor.team && target.alive && inStrike(game, actor, target, ACTOR_RADIUS, weapon, gesture)) {
+      damageActor(game, actor, target, weapon, gesture);
     }
   }
   for (const core of game.cores) {
-    if (core.team !== actor.team && core.health > 0 && inStrike(game, actor, core, CORE_RADIUS, weapon, CORE_RADIUS + ACTOR_RADIUS)) {
+    if (core.team !== actor.team && core.health > 0 && inStrike(game, actor, core, CORE_RADIUS, weapon, gesture, CORE_RADIUS + ACTOR_RADIUS)) {
       damageCore(game, actor, core, weapon);
     }
   }
 }
 
-function beginAttack(game, actor, weapon, input) {
-  const x = axis(input.attackX ?? input.aimX);
-  const y = axis(input.attackY ?? input.aimY);
-  const magnitude = Math.hypot(x, y);
-  actor.attack = { time: 0, hit: false };
-  actor.swing = 0;
-  actor.swingX = magnitude > 0.12 ? x / magnitude : 1;
-  actor.swingY = magnitude > 0.12 ? y / magnitude : 0;
-  actor.stamina -= weapon.stamina;
-  actor.regenDelay = 0.5;
-  emit(game, 'swing', actor, { actorId: actor.id, weaponId: weapon.id });
-}
-
 function updateActor(game, actor, input, dt) {
   if (!actor.alive) {
-    if (game.cores[actor.team]?.health > 0 && game.time >= actor.respawnAt) {
+    if ((actor.drill || game.cores[actor.team]?.health > 0) && game.time >= actor.respawnAt) {
       Object.assign(actor, actor.spawn, { health: actor.maxHealth, stamina: actor.maxStamina, alive: true, route: [], routeGoal: null });
       emit(game, 'respawn', actor, { actorId: actor.id });
     }
@@ -365,13 +382,28 @@ function updateActor(game, actor, input, dt) {
   const aimAlpha = 1 - Math.exp(-dt * (17 / (1 + weapon.weight * 0.52)));
   actor.aimX += (axis(input.aimX) - actor.aimX) * aimAlpha;
   actor.aimY += (axis(input.aimY) - actor.aimY) * aimAlpha;
-  actor.guarding = Boolean(input.guard && actor.stamina > 7 && !actor.attack);
-  const sprint = Boolean(input.sprint && actor.stamina > 5 && !actor.guarding && !actor.attack && (axis(input.moveX) || axis(input.moveZ)));
+  actor.guarding = Boolean(input.guard && actor.stamina > 7 && !isSwinging(actor.combat));
+  const combat = advanceCombat(actor.combat, weapon, dt, {
+    gesture: input.gesture,
+    canAttack: !input.guard && !input.cancelCombo && actor.stamina >= weapon.stamina,
+    cancelBuffer: Boolean(input.guard || input.cancelCombo),
+    allowLateCombo: game.versus === 'online' && actor === game.rival,
+  });
+  if (combat.started) {
+    actor.stamina -= weapon.stamina;
+    actor.regenDelay = 0.5;
+    emit(game, 'swing', actor, { actorId: actor.id, weaponId: weapon.id });
+    if (game.training && actor === game.player) {
+      game.training.swings++;
+      if (actor.combat.gesture.combo) game.training.combos++;
+    }
+  }
 
-  if (input.attack && !actor.guarding && !actor.attack && actor.stamina >= weapon.stamina) beginAttack(game, actor, weapon, input);
-  moveActor(game, actor, input, dt, sprint && !actor.attack);
+  const sprint = Boolean(input.sprint && actor.stamina > 5 && !actor.guarding && !isSwinging(actor.combat)
+    && (axis(input.moveX) || axis(input.moveZ)));
+  moveActor(game, actor, input, dt, sprint);
 
-  if (sprint && !actor.attack) {
+  if (sprint) {
     actor.stamina = Math.max(0, actor.stamina - 24 * dt);
     actor.regenDelay = 0.35;
   } else {
@@ -379,22 +411,7 @@ function updateActor(game, actor, input, dt) {
     if (!actor.regenDelay) actor.stamina = Math.min(actor.maxStamina, actor.stamina + STAMINA_REGEN * (actor.guarding ? 0.36 : 1) * dt);
   }
 
-  if (actor.attack) {
-    actor.attack.time += dt;
-    actor.swing = actor.attack.time / (weapon.windup + weapon.swing + weapon.recovery);
-  }
-}
-
-function finishAttack(actor) {
-  if (!actor.attack) return null;
-  const weapon = getWeapon(actor.weaponId);
-  const striking = !actor.attack.hit && actor.attack.time >= weapon.windup + weapon.swing * 0.35;
-  if (striking) actor.attack.hit = true;
-  if (actor.swing >= 1) {
-    actor.attack = null;
-    actor.swing = -1;
-  }
-  return striking ? weapon : null;
+  return combat.strike && { weapon, gesture: combat.strike };
 }
 
 export function nearbyPickup(game) {
@@ -427,7 +444,7 @@ function collectPickup(game) {
     name = 'Stamina Tonic';
   } else {
     const weapon = getWeapon(pickup.weaponId);
-    if (player.attack) return;
+    if (player.combat.phase !== AttackPhase.IDLE) return;
     if (!player.inventory.includes(weapon.id)) player.inventory.push(weapon.id);
     player.weaponId = weapon.id;
     name = weapon.name;
@@ -443,12 +460,13 @@ export function stepGame(game, elapsed, input = EMPTY_INPUT, rivalInput = EMPTY_
   game.time += dt;
   const actorInputs = [input];
   for (const actor of game.actors.slice(1)) {
-    actorInputs.push(game.versus === 'online' ? rivalInput : actor.alive ? getAiInput(game, actor) : EMPTY_INPUT);
+    actorInputs.push(game.versus === 'online' ? rivalInput : actor.alive
+      ? (actor.drill ? getTrainingInput(game, actor) : getAiInput(game, actor)) : EMPTY_INPUT);
   }
-  for (const [index, actor] of game.actors.entries()) updateActor(game, actor, actorInputs[index], dt);
-  const strikes = game.actors.map(finishAttack);
-  for (const [index, weapon] of strikes.entries()) {
-    if (weapon) connectStrike(game, game.actors[index], weapon);
+  // Collect both fighters' strikes before applying damage so simultaneous hits resolve together.
+  const strikes = game.actors.map((actor, index) => updateActor(game, actor, actorInputs[index], dt));
+  for (const [index, strike] of strikes.entries()) {
+    if (strike) connectStrike(game, game.actors[index], strike.weapon, strike.gesture);
   }
   if (input.interact) collectPickup(game);
 
@@ -456,9 +474,9 @@ export function stepGame(game, elapsed, input = EMPTY_INPUT, rivalInput = EMPTY_
     if (!game.player.alive && !game.rival.alive) game.status = 'draw';
     else if (!game.player.alive) game.status = 'lost';
     else if (!game.rival.alive) game.status = 'won';
-  } else if (game.cores[0].health === 0) {
+  } else if (game.world.mode === 'frontier' && game.cores[0].health === 0) {
     game.status = 'lost';
-  } else if (game.cores.every((core) => core.team === 0 || core.health === 0)) {
+  } else if (game.world.mode === 'frontier' && game.cores.every((core) => core.team === 0 || core.health === 0)) {
     game.status = 'won';
   }
   if (game.status !== 'playing') emit(game, 'match-end', game.player, { status: game.status });
