@@ -6,7 +6,7 @@ import { createWorld, worldSettings } from './world.js';
 import { prepareWorld } from './world-loader.js';
 import { paintWorldMap } from './world-map.js';
 import { WEAPONS, createGame, equipWeapon, getWeapon, nearbyPickup, stepGame } from './simulation.js';
-import { createHostSession, createGuestSession } from './network.js';
+import { createHostSession, createGuestSession, smoothRemoteMovement } from './network.js';
 import { AttackPhase, CombatTuning, comboProgress, isSwinging, makeFlick } from './combat.js';
 import { createRelativeMouse } from './mouse-swing.js';
 import { createSwingAudio } from './swing-audio.js';
@@ -70,6 +70,7 @@ let match;
 let renderer;
 let network;
 let networkRole;
+const remoteMovement = { moveX: 0, moveZ: 0 };
 let remoteInput = {};
 let remoteInputAt = 0;
 let guestGesture;
@@ -96,6 +97,7 @@ let pitSeed = newSeed();
 let selfReady = false;
 let peerReady = false;
 let peerName = 'Friend';
+let peerHeraldry;
 let arenaStarting = false;
 
 for (const weapon of WEAPONS) {
@@ -178,6 +180,7 @@ async function startMatch(mode, { worldSeed = newSeed(), arenaWeapon = weaponSel
     match = createGame(world, { arenaWeapon, startingWeapon: settings.weapon, versus: online ? 'online' : 'bot' });
     localActor().heraldry = settings.heraldry;
     match.player.name = online && networkRole === 'guest' ? peerName : settings.playerName;
+    if (online) remoteActor().heraldry = peerHeraldry;
     if (online) match.rival.name = networkRole === 'guest' ? settings.playerName : peerName;
     const [, kit] = await Promise.race([
       Promise.all([armor, mapKit]), new Promise((resolve) => setTimeout(() => resolve([]), 3200)),
@@ -236,10 +239,12 @@ function disconnect() {
   network = undefined;
   networkRole = undefined;
   remoteInput = {};
+  remoteMovement.moveX = remoteMovement.moveZ = 0;
   remoteInputAt = 0;
   guestGesture = undefined;
   selfReady = peerReady = arenaStarting = false;
   peerName = 'Friend';
+  peerHeraldry = undefined;
   previous?.close();
 }
 
@@ -509,7 +514,9 @@ function frame(now) {
       accumulated += elapsed;
       while (accumulated >= 1 / 60 && match.status === 'playing') {
         const input = makeInput();
-        const peer = now - remoteInputAt < 500 ? { ...remoteInput, gesture: guestGesture } : { cancelCombo: true };
+        const packetAge = now - remoteInputAt;
+        const movement = smoothRemoteMovement(remoteMovement, remoteInput, packetAge, 1 / 60);
+        const peer = packetAge < 500 ? { ...remoteInput, ...movement, gesture: guestGesture } : { ...movement, cancelCombo: true };
         const frozen = match.hitStop > 1e-7;
         stepGame(match, 1 / 60, input, peer);
         processEvents(match.events, now);
@@ -771,7 +778,7 @@ function refreshArenaLobby() {
 
 function sendArenaConfig() {
   if (networkRole === 'host' && network?.status === 'connected') {
-    network.send({ type: 'arena-config', ...arenaConfig(), name: settings.playerName });
+    network.send({ type: 'arena-config', ...arenaConfig(), name: settings.playerName, heraldry: settings.heraldry });
   }
 }
 
@@ -800,7 +807,7 @@ function maybeStartOnlineArena() {
 function readyArena() {
   if (!network) {
     startMatch('arena', arenaConfig());
-  } else if (network.send({ type: 'ready', ready: !selfReady, name: settings.playerName })) {
+  } else if (network.send({ type: 'ready', ready: !selfReady, name: settings.playerName, heraldry: settings.heraldry })) {
     selfReady = !selfReady;
     refreshArenaLobby();
     maybeStartOnlineArena();
@@ -830,6 +837,7 @@ function validCombatSnapshot(combat) {
 function applyOnlineMessage(message) {
   if (message.type === 'ready' && !match && !arenaStarting) {
     peerReady = message.ready === true;
+    peerHeraldry = message.heraldry;
     if (typeof message.name === 'string') peerName = message.name.trim().slice(0, 20) || 'Friend';
     refreshArenaLobby();
     maybeStartOnlineArena();
@@ -854,6 +862,7 @@ function applyOnlineMessage(message) {
         startMatch('arena', { ...config, online: true, countdown: true });
       } else {
         if (typeof message.name === 'string') peerName = message.name.trim().slice(0, 20) || 'Friend';
+        peerHeraldry = message.heraldry;
         pitSeed = config.worldSeed;
         element('arena-era').value = config.era;
         weaponSelect.value = config.arenaWeapon;
@@ -893,7 +902,11 @@ function onlineStatus(status, detail) {
     }
   } else if (status === 'disconnected' || status === 'failed') {
     const message = detail || 'Your opponent disconnected. You can return to the main menu and start a new invite.';
-    if (match) flash(message);
+    if (match) {
+      remoteInput = {};
+      guestGesture = undefined;
+      flash(message);
+    }
     else setText('network-status', message);
   } else if (status === 'gathering') {
     setText('network-status', 'Preparing connection details…');
@@ -927,6 +940,7 @@ async function openNetwork(role, transport) {
       if (network !== session) return;
       networkOutput.value = code;
       setText('network-output-label', 'Invite code to send');
+      setText('network-copy', 'Copy invite');
       setText('network-status', transport === 'local'
         ? 'Open this page in another tab, select Join a friend, and exchange the codes.'
         : 'Send the invite code to your friend, then paste the response they send back.');
@@ -956,6 +970,7 @@ networkConnect.addEventListener('click', async () => {
       if (network !== session) return;
       networkOutput.value = code;
       setText('network-output-label', 'Response code to send');
+      setText('network-copy', 'Copy response');
       setText('network-status', 'Send this response to your friend. Select Ready after they connect.');
       element('network-output-field').hidden = false;
     }
@@ -968,10 +983,11 @@ networkConnect.addEventListener('click', async () => {
 });
 element('network-copy').addEventListener('click', async () => {
   const button = element('network-copy');
+  const label = networkRole === 'guest' ? 'Copy response' : 'Copy invite';
   try {
     await navigator.clipboard.writeText(networkOutput.value);
     button.textContent = 'Copied';
-    setTimeout(() => { button.textContent = 'Copy code'; }, 1200);
+    setTimeout(() => { button.textContent = label; }, 1200);
   } catch {
     networkOutput.select();
     setText('network-status', 'Code selected. Copy it with Ctrl+C or Command+C.');

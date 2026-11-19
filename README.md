@@ -46,7 +46,7 @@ Career records sessions, hits, knockdowns and longest chains in this browser. Th
 2. The guest opens **Join a friend**, pastes the invite, and sends back the generated response.
 3. The host pastes the response. Both players select **Ready**.
 
-Both players should load the current build. The connection uses direct WebRTC. **Play across two tabs** uses the same code exchange for side-by-side windows in one browser profile. The Frontier camp is a local lobby preview with bot rivals.
+Both players should load the current build. The connection uses direct WebRTC with compressed invite codes. **Play across two tabs** uses the same code exchange for side-by-side windows in one browser profile. The Frontier camp is a local lobby preview with bot rivals. [How Arena connections work](NETWORK.md)
 
 ## Porting and credits
 

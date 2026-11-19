@@ -20,3 +20,10 @@
 - Career saves local sessions, hits, knockdowns and longest chains. The match recap shows accuracy, defenses and time.
 - Training has a short optional drill guide. Controls includes a live swipe test, and M opens the Frontier field map.
 - Music and ambience have their own levels. The menu sound and footsteps are synthesized in the browser.
+
+## D. Arena connections
+
+- Direct invites use gzip when it makes the code shorter. Copy buttons name the code they copy.
+- An old invite tells both players to refresh. Connection loss clears stale attack input.
+- Guest movement eases on the host and fades when packets stop.
+- Transport tests cover malformed messages, large payloads and invite round trips.

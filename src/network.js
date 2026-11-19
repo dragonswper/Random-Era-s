@@ -1,4 +1,4 @@
-const CODE_VERSION = 'RE2';
+const CODE_VERSION = 'RE3';
 const CHANNEL_LABEL = 'random-eras-arena';
 const ICE_TIMEOUT = 7_000;
 const MAX_CODE_LENGTH = 24_000;
@@ -12,30 +12,60 @@ const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
 ];
 
-function encodeDescription(description, sessionId) {
-  const bytes = new TextEncoder().encode(description.sdp);
-  const encoded = btoa(String.fromCharCode(...bytes))
-    .replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
-  return `${CODE_VERSION}.${description.type}.${sessionId}.${encoded}`;
+function assertVersion(version) {
+  if (/^RE\d+$/.test(version) && version !== CODE_VERSION) {
+    throw new Error('This invite uses another build. Refresh the game on both devices and make a new invite.');
+  }
 }
 
-function decodeDescription(code, expectedType) {
+const toBase64 = (bytes) => btoa(String.fromCharCode(...bytes))
+  .replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
+
+export async function encodeDescription(description, sessionId) {
+  const bytes = new TextEncoder().encode(description.sdp);
+  let payload = 'u' + toBase64(bytes);
+  if (typeof CompressionStream !== 'undefined') {
+    const compressed = await new Response(new Blob([bytes]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer();
+    if (compressed.byteLength < bytes.length) payload = 'g' + toBase64(new Uint8Array(compressed));
+  }
+  return `${CODE_VERSION}.${description.type}.${sessionId}.${payload}`;
+}
+
+async function inflate(bytes) {
+  const reader = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip')).getReader();
+  const buffer = new Uint8Array(MAX_CODE_LENGTH);
+  let size = 0;
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) return buffer.subarray(0, size);
+      if (value.length + size > buffer.length) throw new Error('Invite is too large.');
+      buffer.set(value, size);
+      size += value.length;
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+}
+
+export async function decodeDescription(code, expectedType) {
   const label = expectedType === 'offer' ? 'invite' : 'response';
   const invalidCode = () => new Error(`Paste the complete Arena ${label} code.`);
   if (typeof code !== 'string' || code.length > MAX_CODE_LENGTH) throw invalidCode();
 
   const [version, type, sessionId, encoded, extra] = code.replace(/\s/g, '').split('.');
-  if (version === 'RE1') throw new Error('Refresh the game on both devices and create a new Arena invite.');
+  assertVersion(version);
   if (version !== CODE_VERSION || type !== expectedType || extra !== undefined ||
-      !ID_PATTERN.test(sessionId ?? '') || !/^[\w-]+$/.test(encoded ?? '')) {
+      !ID_PATTERN.test(sessionId ?? '') || !/^[gu][\w-]+$/.test(encoded ?? '')) {
     throw invalidCode();
   }
 
   let sdp;
   try {
-    const binary = atob(encoded.replaceAll('-', '+').replaceAll('_', '/'));
-    sdp = new TextDecoder('utf-8', { fatal: true })
-      .decode(Uint8Array.from(binary, (character) => character.charCodeAt(0)));
+    const binary = atob(encoded.slice(1).replaceAll('-', '+').replaceAll('_', '/'));
+    let data = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    if (encoded[0] === 'g') data = await inflate(data);
+    sdp = new TextDecoder('utf-8', { fatal: true }).decode(data);
   } catch {
     throw invalidCode();
   }
@@ -44,6 +74,15 @@ function decodeDescription(code, expectedType) {
     throw invalidCode();
   }
   return { description: { type, sdp }, sessionId };
+}
+
+export function smoothRemoteMovement(current, input, age, step) {
+  const fade = Math.max(0, Math.min(1, (420 - age) / 220));
+  const blend = 1 - Math.exp(-step * 24);
+  const axis = (value) => Number.isFinite(value) ? Math.max(-1, Math.min(1, value)) : 0;
+  current.moveX += (axis(input.moveX) * fade - current.moveX) * blend;
+  current.moveZ += (axis(input.moveZ) * fade - current.moveZ) * blend;
+  return current;
 }
 
 function waitForCandidates(peer, signal) {
@@ -74,11 +113,11 @@ function createId() {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
-function parseMessage(data) {
+export function parseMessage(data) {
   if (typeof data !== 'string' || data.length > MAX_MESSAGE_LENGTH) return null;
   try {
     const message = JSON.parse(data);
-    return isMessage(message) ? message : null;
+    return isMessage(message) && typeof message.type === 'string' ? message : null;
   } catch {
     return null;
   }
@@ -158,7 +197,7 @@ function createWebRtcSession(role, { onMessage = () => {}, onStatus = () => {} }
         throw new Error('No connection addresses were found. Try a different network.');
       }
 
-      const code = encodeDescription(peer.localDescription, sessionId);
+      const code = await encodeDescription(peer.localDescription, sessionId);
       setStatus('waiting');
       return code;
     } catch (error) {
@@ -202,7 +241,7 @@ function createWebRtcSession(role, { onMessage = () => {}, onStatus = () => {} }
     };
     session.acceptAnswer = async (code) => {
       if (status !== 'waiting') throw new Error('Create an Arena invite before applying a response.');
-      const answer = decodeDescription(code, 'answer');
+      const answer = await decodeDescription(code, 'answer');
       if (answer.sessionId !== sessionId) throw new Error('This response belongs to a different Arena invite.');
 
       setStatus('connecting');
@@ -216,7 +255,7 @@ function createWebRtcSession(role, { onMessage = () => {}, onStatus = () => {} }
   } else {
     session.acceptInvite = async (code) => {
       if (status !== 'idle') throw new Error('Start a new Arena session to join another invite.');
-      const offer = decodeDescription(code, 'offer');
+      const offer = await decodeDescription(code, 'offer');
       sessionId = offer.sessionId;
       return gatherDescription(async () => {
         await peer.setRemoteDescription(offer.description);
@@ -234,7 +273,7 @@ function decodeLocalCode(code, expectedType) {
     throw new Error(`Paste the complete local Arena ${label} code.`);
   }
   const [version, type, sessionId, guestId, extra] = code.replace(/\s/g, '').split('.');
-  if (version === 'RE1') throw new Error('Refresh the game on both devices and create a new Arena invite.');
+  assertVersion(version);
   const validGuestId = expectedType === 'local-answer' ? ID_PATTERN.test(guestId ?? '') : guestId === undefined;
   if (version !== CODE_VERSION || type !== expectedType || !ID_PATTERN.test(sessionId ?? '') ||
       !validGuestId || extra !== undefined) {
@@ -360,6 +399,7 @@ export function createGuestSession(options = {}) {
     },
     async acceptInvite(code) {
       if (closed) throw new Error('Start a new Arena session to join another invite.');
+      if (typeof code === 'string') assertVersion(code.slice(0, 12).trim().split('.')[0]);
       const localPrefix = `${CODE_VERSION}.local-offer.`;
       const local = typeof code === 'string' && code.replace(/\s/g, '').startsWith(localPrefix);
       if (!session || (session.status === 'idle' && (session.transport === 'local') !== local)) {
