@@ -91,3 +91,37 @@ test('arena fighters deal simultaneous damage using their captured gestures', ()
   assert.equal(game.player.health, 100 - damage);
   assert.equal(game.rival.health, 100 - damage);
 });
+
+test('a late guard parries a strike and freezes both fighters briefly', () => {
+  const game = createGame(createWorld('PARRY', 'arena'), { arenaWeapon: 'iron-axe', versus: 'online' });
+  game.player.z = 1;
+  game.rival.z = -1;
+  stepGame(game, 1 / 60, { gesture: down });
+  for (let frame = 0; frame < 19; frame++) stepGame(game, 1 / 60);
+  let parry;
+  for (let frame = 0; frame < 12 && !parry; frame++) {
+    stepGame(game, 1 / 60, {}, { guard: true });
+    parry = game.events.find(({ type }) => type === 'parry');
+  }
+  assert.ok(parry);
+  assert.equal(game.rival.health, 100);
+  assert.ok(game.player.stagger > 0);
+  assert.ok(game.hitStop >= 2 / 60);
+  const time = game.time;
+  stepGame(game, 1 / 60);
+  assert.equal(game.time, time);
+});
+
+test('an exhausted held guard breaks and stays down until released', () => {
+  const game = createGame(createWorld('GUARD', 'arena'), { versus: 'online' });
+  game.rival.stamina = 0.1;
+  stepGame(game, 1 / 60, {}, { guard: true });
+  assert.ok(game.events.some(({ type }) => type === 'guard-break'));
+  assert.equal(game.rival.guarding, false);
+  assert.equal(game.rival.guardLocked, true);
+  for (let frame = 0; frame < 120; frame++) stepGame(game, 1 / 60, {}, { guard: true });
+  assert.equal(game.rival.guarding, false);
+  stepGame(game, 1 / 60);
+  stepGame(game, 1 / 60, {}, { guard: true });
+  assert.equal(game.rival.guarding, true);
+});

@@ -27,7 +27,7 @@ export function createMouseSwing() {
     stroke.length = 0;
   }
 
-  function readStroke(dt, travel, minDistance) {
+  function readStroke(dt, travel, minDistance, minVelocity) {
     const cutoff = time - FlickWindow;
     stroke.push({ x: dx, y: dy, travel, start: time - dt, end: time });
     while (stroke[0].end <= cutoff) stroke.shift();
@@ -46,14 +46,14 @@ export function createMouseSwing() {
       const distance = Math.hypot(x, y);
       const velocity = distance / (time - start);
       // A long back-and-forth motion has plenty of travel and very little net distance.
-      if (distance >= minDistance && distance >= path * MIN_STRAIGHTNESS && velocity >= MinFlickVelocity) {
-        return makeFlick(x, y, velocity);
+      if (distance >= minDistance && distance >= path * MIN_STRAIGHTNESS && velocity >= minVelocity) {
+        return makeFlick(x, y, Math.max(MinFlickVelocity, velocity));
       }
     }
     return null;
   }
 
-  function sample(dt, canFlick, distanceMultiplier = 1) {
+  function sample(dt, canFlick, distanceMultiplier = 1, speedMultiplier = 1) {
     if (!Number.isFinite(dt) || dt <= 0) return NO_MOTION;
     // Don't replay motion accumulated while the browser was stalled or inactive.
     if (dt > STALE_FRAME_TIME) {
@@ -61,15 +61,16 @@ export function createMouseSwing() {
       return NO_MOTION;
     }
 
+    const minVelocity = MinFlickVelocity * speedMultiplier;
     time += dt;
     const travel = Math.hypot(dx, dy);
     const velocity = travel / dt;
     let gesture = null;
-    if (velocity >= MinFlickVelocity) {
+    if (velocity >= minVelocity) {
       quiet = 0;
       // Motion that starts during guard or recovery cannot carry into a new swing.
       if (!canFlick) spent = true;
-      if (!spent) gesture = readStroke(dt, travel, MinFlickDistance * distanceMultiplier);
+      if (!spent) gesture = readStroke(dt, travel, MinFlickDistance * distanceMultiplier, minVelocity);
       if (gesture || spent) {
         spent = true;
         stroke.length = 0;

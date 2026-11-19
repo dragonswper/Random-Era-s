@@ -319,3 +319,16 @@
 @media (prefers-reduced-motion: reduce) {
   .daily-card, .field-note, .seal-code, .arena-rules { transform: none; }
 }
+
+.reticle-meter {
+  position: absolute;
+  inset: calc(var(--meter-offset) * -1);
+  border-radius: 50%;
+  mask: radial-gradient(transparent 61%, black 66%);
+  background: conic-gradient(from var(--meter-start), var(--meter-color) calc(var(--meter-value, 100%) / 2), transparent 0);
+  pointer-events: none;
+}
+.reticle-meter--health { --meter-offset: 10px; --meter-start: 180deg; --meter-value: var(--vitality); --meter-color: var(--campaign-gold); }
+.reticle-meter--stamina { --meter-offset: 12px; --meter-start: 0deg; --meter-value: var(--endurance); --meter-color: #a3d1d6; }
+.hud-reticle[data-impact="parry"] { outline: 3px double #9edfed; outline-offset: 8px; }
+.hud-reticle[data-impact="guard-break"] { outline: 2px dashed var(--campaign-gold); outline-offset: 8px; }

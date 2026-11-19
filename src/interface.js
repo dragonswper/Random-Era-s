@@ -228,7 +228,7 @@ export function createInterface(store, { onStart, onSettings, onExport, onCopySe
       else control.value = state[key];
       const label = document.querySelector(`[data-value="${key}"]`);
       if (label) {
-        const multiplier = key === 'sensitivity' || key === 'swingDistance';
+        const multiplier = ['sensitivity', 'swingDistance', 'swipeSpeed', 'swingResponse'].includes(key);
         label.textContent = multiplier ? state[key].toFixed(2) + '×' : Math.round(state[key] * 100) + '%';
       }
     }
@@ -274,6 +274,10 @@ export function createInterface(store, { onStart, onSettings, onExport, onCopySe
       else await document.documentElement.requestFullscreen();
       statuses.textContent = '';
     } catch { statuses.textContent = 'Fullscreen is unavailable here.'; }
+  });
+  element('reset-combat').addEventListener('click', () => {
+    for (const [key, value] of Object.entries({ swingDistance: 1, swipeSpeed: 1, swingResponse: 1, bufferWindow: 0.30 })) store.set(key, value);
+    statuses.textContent = 'Combat settings reset.';
   });
   element('export-terrain').addEventListener('click', () => { statuses.textContent = onExport(); });
   element('copy-match-seed')?.addEventListener('click', async () => { statuses.textContent = await onCopySeed(); });

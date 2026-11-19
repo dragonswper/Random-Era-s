@@ -125,6 +125,7 @@
         <div class="hud-message" id="hud-message" role="status" aria-live="polite"></div>
         <div class="hud-reticle" id="hud-reticle" aria-hidden="true">
           <span class="reticle-dot"></span>
+          <span class="reticle-meter reticle-meter--health"></span><span class="reticle-meter reticle-meter--stamina"></span>
           <span class="reticle-arrow" id="reticle-swipe" hidden></span>
           <span class="reticle-arrow reticle-arrow--combo" id="reticle-combo" hidden></span>
         </div>
@@ -232,12 +233,16 @@
         <div class="settings-panel" data-setting-panel="controls" hidden>
           <label>Attack input <select data-setting="attackInput"><option value="swipe">Mouse swipe</option><option value="click">Left click</option></select></label>
           <label>Look sensitivity <input type="range" data-setting="sensitivity" min="0.35" max="2.5" step="0.05"><output data-value="sensitivity"></output></label>
-          <label>Swing distance <input type="range" data-setting="swingDistance" min="1" max="2" step="0.1"><output data-value="swingDistance"></output></label>
           <label>Invert look Y <input type="checkbox" data-setting="invert"></label>
           <div class="rebind-grid" id="rebind-controls"></div>
           <button type="button" class="ink-button" data-controls>View all controls</button>
         </div>
         <div class="settings-panel" data-setting-panel="gameplay" hidden>
+          <label>Swing distance <input type="range" data-setting="swingDistance" min="0.75" max="2" step="0.05"><output data-value="swingDistance"></output></label>
+          <label>Swipe speed <input type="range" data-setting="swipeSpeed" min="0.75" max="1.75" step="0.05"><output data-value="swipeSpeed"></output></label>
+          <label>Swing sensitivity <input type="range" data-setting="swingResponse" min="0.5" max="1.5" step="0.05"><output data-value="swingResponse"></output></label>
+          <label>Combo window in solo play <input type="range" data-setting="bufferWindow" min="0.15" max="0.45" step="0.01"><output data-value="bufferWindow"></output></label>
+          <button type="button" class="ink-button" id="reset-combat">Reset combat tuning</button>
           <label>Frontier camera <select data-setting="frontierView"><option value="first-person">First person</option><option value="third-person">Third person</option></select></label>
           <label>Minimap <input type="checkbox" data-setting="minimap"></label>
           <label>Terrain map overlay <select data-setting="terrainOverlay"><option value="biome">Biomes</option><option value="height">Elevation</option><option value="slope">Slope</option><option value="scatter">Scatter density</option><option value="cores">Core sites</option><option value="paths">Paths</option></select></label>

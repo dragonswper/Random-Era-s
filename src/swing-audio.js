@@ -49,5 +49,25 @@ export function createSwingAudio() {
     source.start();
   }
 
-  return { unlock, play, setVolume(value) { volume = value; } };
+  function impact(surface, weight) {
+    if (context?.state !== 'running' || !volume) return;
+    const partials = {
+      metal: [415, 786, 1235], armor: [143, 316, 544], wood: [108, 221, 342], stone: [78, 160, 274],
+    }[surface] ?? [110, 220, 387];
+    const now = context.currentTime;
+    for (const [index, partial] of partials.entries()) {
+      const tone = context.createOscillator();
+      const level = context.createGain();
+      const decay = (surface === 'metal' ? 0.21 : 0.10) / (1 + index * 0.42);
+      tone.frequency.value = partial / (1 + weight * 0.056);
+      level.gain.setValueAtTime(volume * 0.17 / (index + 1), now);
+      level.gain.exponentialRampToValueAtTime(0.0001, now + decay);
+      tone.connect(level).connect(context.destination);
+      tone.onended = () => { tone.disconnect(); level.disconnect(); };
+      tone.start(now);
+      tone.stop(now + decay);
+    }
+  }
+
+  return { unlock, play, impact, setVolume(value) { volume = value; } };
 }

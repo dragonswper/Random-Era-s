@@ -575,6 +575,26 @@ function makeWeapon(parent, geometries, weapon) {
   meshPart(parent, box, handle, 0, 0.038, 0, 0.089, 0.33, 0.093, 0);
   meshPart(parent, geometries.boulder, guard, 0, -0.146, 0, 0.137, 0.153, 0.118);
 
+  if (weapon.form === 'club' || weapon.form === 'mace') {
+    const energy = weapon.form === 'mace';
+    meshPart(parent, geometries.column, handle, 0, 0.48, 0, 0.11, 1.04, 0.11);
+    meshPart(parent, energy ? geometries.jewel : geometries.boulder, steel, 0, 1.13, 0,
+      energy ? 0.43 : 0.32, 0.44, 0.31, 0.18);
+    meshPart(parent, geometries.column, guard, 0, 0.88, 0, 0.19, 0.12, 0.19);
+    return;
+  }
+  if (weapon.form === 'spear') {
+    meshPart(parent, geometries.column, handle, 0, 0.84, 0, 0.065, 2.0, 0.065);
+    meshPart(parent, geometries.jewel, steel, 0, 1.83, 0, 0.16, 0.47, 0.075);
+    return;
+  }
+  if (weapon.form === 'curved') {
+    meshPart(parent, box, guard, 0, 0.19, 0, 0.20, 0.05, 0.14);
+    for (let i = 0; i < 4; i++) meshPart(parent, box, steel, i * 0.022, 0.35 + i * 0.26, 0, 0.085, 0.29, 0.047, -i * 0.077);
+    meshPart(parent, geometries.jewel, edge, 0.102, 1.24, 0, 0.080, 0.17, 0.045, -0.24);
+    return;
+  }
+
   if (weapon.id === 'iron-axe') {
     meshPart(parent, box, handle, 0, 0.63, 0, 0.083, 1.29, 0.083);
     meshPart(parent, box, guard, 0, 1.26, 0, 0.22, 0.21, 0.13);
@@ -637,14 +657,15 @@ function mountKnight(rig, model, geometries) {
 }
 
 function sampleSwing(progress, direction, wrist, blade) {
+  const sweep = Math.abs(direction.x);
   const angle = (progress - 0.5) * Math.PI;
   // Sine follows the swipe in the view plane, while cosine carries the blade through contact.
   const travel = Math.sin(angle);
   const forward = Math.cos(angle);
   wrist.set(
-    0.29 + direction.x * 0.55 * travel,
-    1.38 + direction.y * 0.55 * travel + forward * 0.08,
-    0.17 + forward * 0.61,
+    0.29 + direction.x * 0.68 * travel,
+    1.38 + direction.y * (direction.y > 0 ? 0.47 : 0.57) * travel + forward * (0.08 + sweep * 0.11),
+    0.17 + forward * (0.66 - sweep * 0.14),
   );
   blade.set(
     direction.x * 0.75 * travel + (1 - Math.abs(direction.x)) * 0.14,
@@ -787,7 +808,7 @@ function drawTrail(rig, weapon, active, progress, direction) {
   const positions = rig.trails.geometry.getAttribute('position');
   const start = Math.max(0, progress - 0.29);
   const axe = weapon.id === 'iron-axe';
-  const tipLength = rig.weaponTip ?? (axe ? 1.43 : 0.24 + swordLength(weapon) * 1.045);
+  const tipLength = rig.weaponTip ?? ({ club: 1.41, mace: 1.45, spear: 2.16, curved: 1.34 }[weapon.form] ?? (axe ? 1.43 : 0.24 + swordLength(weapon) * 1.045));
   const tipSide = axe ? 0.515 : 0;
 
   rig.trails.material.opacity = (1 - Math.abs(0.51 - progress) * 1.72) * 0.48;
@@ -858,7 +879,12 @@ function makePickupRig(pickup, world, geometries, getWeapon) {
   meshPart(root, geometries.box, lambert('#504b38'), 0, 0.082, 0, 0.56, 0.26, 0.51, 0.08);
   meshPart(root, geometries.box, lambert('#8c7350'), 0, 0.216, 0, 0.59, 0.11, 0.54);
   meshPart(root, geometries.box, luminous(hue), 0, 0.198, 0.275, 0.13, 0.112, 0.047);
-  const orb = meshPart(root, geometries.jewel, luminous(hue), 0, 0.68, 0, 0.205, 0.28, 0.205);
+  const orb = new THREE.Group();
+  root.add(orb);
+  if (pickup.item === 'weapon') {
+    makeWeapon(orb, geometries, getWeapon(pickup.weaponId));
+    orb.scale.setScalar(0.49);
+  } else meshPart(orb, geometries.jewel, luminous(hue), 0, 0, 0, 0.205, 0.28, 0.205);
   const ring = new THREE.Mesh(new THREE.RingGeometry(0.41, 0.45, 24), new THREE.MeshBasicMaterial({ color: hue, transparent: true, side: THREE.DoubleSide, depthWrite: false, opacity: 0.61 }));
   ring.rotation.x = -Math.PI / 2;
   ring.position.y = 0.06;
@@ -1020,7 +1046,6 @@ export function createRenderer(canvas) {
   let lastFirstPerson = false;
   let lastWidth = 0;
   let lastHeight = 0;
-  let lastEvent = null;
   let elapsed = 0;
   let viewModelRig = null;
 
@@ -1054,7 +1079,6 @@ export function createRenderer(canvas) {
     world.regions.forEach((region) => regions.set(region.id, region));
     blockers = cameraBlockers(world);
     cameraInitialized = false;
-    lastEvent = null;
     elapsed = 0;
     const tint = worldTint(world);
     const arena = world.mode !== 'frontier';
@@ -1102,10 +1126,16 @@ export function createRenderer(canvas) {
     const firstPerson = Boolean(view.firstPerson);
     const recoil = phase === AttackPhase.ACTIVE_SWING ? Math.sin((phaseTime / weapon.swing) * Math.PI) ** 2 : 0;
     const power = view.reducedMotion ? 0 : recoil * weapon.weight * (firstPerson ? 0.22 : 0.4);
+    const kick = view.reducedMotion ? 0 : view.impactKick ?? 0;
+    const fov = mixes(camera.fov, 61 + (view.reducedMotion ? 0 : clamp(((actor.speed || 0) - 6.3) * 2.1, 0, 4.5) - kick * 2.8), 1 - Math.exp(-dt * 15));
+    if (Math.abs(camera.fov - fov) > 0.02) {
+      camera.fov = fov;
+      camera.updateProjectionMatrix();
+    }
     const jitter = view.reducedMotion ? 0 : Math.sin(time * 10.6) * 0.014 * Math.min(1, (actor.speed || 0) / 7);
     if (firstPerson) {
-      cameraDesired.set(x + directionX * 0.11, y + 1.985 + jitter, z + directionZ * 0.11);
-      const rise = Math.sin(pitch + swingY * power * 0.016);
+      cameraDesired.set(x + directionX * 0.11, y + 1.985 + jitter + kick * 0.042, z + directionZ * 0.11);
+      const rise = Math.sin(pitch + swingY * power * 0.016 + kick * 0.037);
       cameraTarget.set(x + (directionX * 8 - directionZ * power * 0.086 * swingX) * Math.cos(pitch), y + 1.985 + rise * 8 + jitter, z + (directionZ * 8 + directionX * power * 0.086 * swingX) * Math.cos(pitch));
     } else {
       const distance = world.mode === 'frontier' ? 7.55 : 6.55;
@@ -1197,10 +1227,6 @@ export function createRenderer(canvas) {
         if (rig.knight) rig.knight.sheathedDagger.visible = weapon.id !== 'knight-dagger';
         rig.weaponId = weapon.id;
       }
-      if (rig.health !== null && member.health < rig.health) {
-        particles.impact(member.x, world.height(member.x, member.z) + 1.16, member.z, color('#ffe3a1'), member.health > 0 ? 8 : 14);
-      }
-      rig.health = member.health;
       const firstPerson = own && view.firstPerson;
       const bob = poseActor(rig, member, world, weapon, dt, firstPerson);
       if (own) {
@@ -1262,13 +1288,11 @@ export function createRenderer(canvas) {
       rig.ring.material.opacity = 0.43 + Math.sin(elapsed * 2.7 + entry.z) * 0.15;
     }
 
-    if (game.events?.[0] !== lastEvent) {
-      for (const event of game.events || []) {
-        if (event.type === 'block') particles.impact(event.x, world.height(event.x, event.z) + 1.46, event.z, color('#b3e5de'), 5);
-      }
-      lastEvent = game.events?.[0];
+    for (const event of view.impacts ?? []) {
+      const spark = event.type === 'parry' ? '#90dcf3' : event.type === 'guard-break' ? '#f5a365'
+        : { metal: '#fff2c8', armor: '#ffd387', wood: '#d99f58', stone: '#d8ccad' }[event.surface];
+      particles.impact(event.x, world.height(event.x, event.z) + 1.42, event.z, color(spark), event.type === 'parry' ? 15 : 9);
     }
-
     particles.update(dt);
     graphics.render(scene, camera);
     if (viewModelRig) {

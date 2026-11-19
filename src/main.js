@@ -52,6 +52,14 @@ const isCapturing = mouse.isCaptured;
 const modal = (dialog) => { if (!dialog.open) dialog.showModal(); };
 const close = (dialog) => { if (dialog.open) dialog.close(); };
 
+const impacts = [];
+let impactKick = 0;
+let impactUntil = 0;
+let impactCaption = '';
+let eventSequence = 0;
+let heardEvent = 0;
+const recentImpacts = [];
+
 let match;
 let renderer;
 let network;
@@ -186,6 +194,8 @@ async function startMatch(mode, { worldSeed = newSeed(), arenaWeapon = weaponSel
     networkStepAt = 0;
     snapshotAt = performance.now();
     lastSwoosh = 0;
+    impacts.length = recentImpacts.length = 0;
+    impactKick = impactUntil = eventSequence = heardEvent = 0;
     accumulated = 0;
     lastFrame = 0;
     lastDrawAt = 0;
@@ -285,7 +295,7 @@ function getComboProgress(player, now) {
 }
 
 function canAttack(player, combo) {
-  return player.alive && !guarding && (player.combat.phase === AttackPhase.IDLE || combo !== null);
+  return player.alive && !guarding && !player.stagger && (player.combat.phase === AttackPhase.IDLE || combo !== null);
 }
 
 function queueAttack(player, gesture, progress, now) {
@@ -303,10 +313,10 @@ function sampleMouse(now, dt) {
   const { phase } = player.combat;
   const progress = getComboProgress(player, now);
   const canFlick = settings.attackInput === 'swipe' && canAttack(player, progress);
-  const { dx, dy, gesture } = mouse.sample(dt, canFlick, settings.swingDistance);
+  const { dx, dy, gesture } = mouse.sample(dt, canFlick, settings.swingDistance, settings.swipeSpeed);
   const magnitude = Math.hypot(dx, dy);
   if (magnitude) {
-    const response = Math.min(magnitude / 17, 1);
+    const response = Math.min(magnitude * settings.swingResponse / 17, 1);
     aimX += (dx / magnitude - aimX) * response;
     aimY += (dy / magnitude - aimY) * response;
   }
@@ -332,7 +342,7 @@ function makeInput() {
     moveX: forward * sin - side * cos,
     moveZ: forward * cos + side * sin,
     facing: view.yaw,
-    aimX, aimY, interact, guard: guarding,
+    aimX, aimY, interact, bufferWindow: settings.bufferWindow, guard: guarding,
     sprint: keys.has(bound.sprint) || (bound.sprint === 'ShiftLeft' && keys.has('ShiftRight')),
     gesture: pendingGesture?.value,
     cancelCombo: !isCapturing(),
@@ -387,7 +397,7 @@ document.addEventListener('keydown', (event) => {
   if (code === 'Tab') showScore();
   if (code === settings.keys.pickup) interact = true;
   if (code === 'KeyV' && match.world.mode !== 'arena') setPerspective(!view.firstPerson);
-  if (/^Digit[1-6]$/.test(code)) equipWeapon(match, Number(code.at(-1)) - 1);
+  if (/^Digit[1-9]$/.test(code)) equipWeapon(match, Number(code.at(-1)) - 1);
 });
 document.addEventListener('keyup', (event) => keys.delete(event.code));
 
@@ -419,10 +429,30 @@ function flash(text, now = performance.now()) {
   hudAt = 0;
 }
 
+const impactLabels = { hit: 'Hit', 'core-hit': 'Core struck', block: 'Blocked', parry: 'Parry', 'guard-break': 'Guard broken' };
+
+function reactToImpact(event, now) {
+  impacts.push(event);
+  if (event.actorId !== localActor().id && event.targetId !== localActor().id) return;
+  const weight = event.weaponId ? getWeapon(event.weaponId).weight : 1;
+  impactKick = clamp(0.44 + weight * 0.14, 0, 1);
+  impactUntil = now + 430;
+  impactCaption = impactLabels[event.type];
+  reticle.dataset.impact = event.type;
+  swingAudio.impact(event.surface, weight);
+}
+
 function processEvents(events, now) {
   const id = localActor().id;
   const team = localActor().team;
   for (const event of events) {
+    if (Object.hasOwn(impactLabels, event.type)) {
+      reactToImpact(event, now);
+      if (isOnline() && networkRole === 'host') {
+        recentImpacts.push({ ...event, sequence: ++eventSequence });
+        if (recentImpacts.length > 12) recentImpacts.shift();
+      }
+    }
     if (event.type === 'pickup' && event.actorId === id) flash(`Picked up ${event.name}`, now);
     if (event.type === 'core-hit' && event.team === team) flash('Your core is under attack!', now);
     if (event.type === 'core-destroyed' && event.team !== team) flash('Rival core destroyed', now);
@@ -454,11 +484,14 @@ function frame(now) {
       while (accumulated >= 1 / 60 && match.status === 'playing') {
         const input = makeInput();
         const peer = now - remoteInputAt < 500 ? { ...remoteInput, gesture: guestGesture } : { cancelCombo: true };
-        guestGesture = undefined;
+        const frozen = match.hitStop > 1e-7;
         stepGame(match, 1 / 60, input, peer);
         processEvents(match.events, now);
-        pendingGesture = undefined;
-        interact = false;
+        if (!frozen) {
+          guestGesture = undefined;
+          pendingGesture = undefined;
+          interact = false;
+        }
         accumulated -= 1 / 60;
       }
       if (isOnline() && (now >= networkStepAt || match.status !== 'playing')) {
@@ -467,9 +500,11 @@ function frame(now) {
       }
     }
   }
+  impactKick *= Math.exp(-elapsed * 16);
   updateCombatFeedback(localActor(), now);
   if (settings.fps === '0' || !lastDrawAt || now - lastDrawAt >= 1000 / Number(settings.fps) - .6) {
-    renderer.draw(match, { ...view, reducedMotion: settings.reducedMotion }, lastDrawAt ? (now - lastDrawAt) / 1000 : elapsed);
+    renderer.draw(match, { ...view, impactKick, impacts, reducedMotion: settings.reducedMotion }, lastDrawAt ? (now - lastDrawAt) / 1000 : elapsed);
+    impacts.length = 0;
     lastDrawAt = now;
   }
   if (now >= hudAt) {
@@ -506,6 +541,9 @@ function updateCombatFeedback(player, now) {
   if (reticle.dataset.phase !== combat.phase) reticle.dataset.phase = combat.phase;
   if (reticle.dataset.direction !== direction) reticle.dataset.direction = direction;
   reticle.classList.toggle('guarding', player.guarding);
+  reticle.style.setProperty('--vitality', `${player.health / player.maxHealth * 100}%`);
+  reticle.style.setProperty('--endurance', `${player.stamina / player.maxStamina * 100}%`);
+  if (now >= impactUntil && reticle.dataset.impact) delete reticle.dataset.impact;
   reticle.classList.toggle('buffer-open', getComboProgress(player, now) !== null);
   showSwipe(swipeArrow, gesture);
   showSwipe(comboArrow, combat.buffered);
@@ -514,7 +552,8 @@ function updateCombatFeedback(player, now) {
     lastSwoosh = combat.swingId;
     swingAudio.play(gesture.velocity);
   }
-  setText('hud-caption', settings.captions && combat.phase === AttackPhase.ACTIVE_SWING ? `${direction[0]}${direction.slice(1).toLowerCase()} swing` : '');
+  setText('hud-caption', settings.captions ? (now < impactUntil ? impactCaption : combat.phase === AttackPhase.ACTIVE_SWING
+    ? `${direction[0]}${direction.slice(1).toLowerCase()} swing` : '') : '');
 }
 
 function updateHud(now) {
@@ -642,7 +681,7 @@ function finish() {
 
 function sendSnapshot() {
   network?.send({
-    type: 'snapshot', time: match.time, status: match.status, actors: match.actors,
+    type: 'snapshot', time: match.time, status: match.status, actors: match.actors, impacts: recentImpacts,
   });
 }
 
@@ -778,6 +817,12 @@ function applyOnlineMessage(message) {
       match.time = time;
       match.status = status;
       snapshotAt = performance.now();
+      if (Array.isArray(message.impacts)) for (const event of message.impacts.slice(-12)) {
+        if (!event || !Number.isSafeInteger(event.sequence) || event.sequence <= heardEvent
+          || !Object.hasOwn(impactLabels, event.type) || !Number.isFinite(event.x) || !Number.isFinite(event.z)) continue;
+        heardEvent = event.sequence;
+        reactToImpact(event, snapshotAt);
+      }
     }
   }
 }
@@ -922,7 +967,7 @@ async function copyWorldLink() {
 function applySettings(key) {
   if (key === 'quality' || key === 'resolution') renderer?.setQuality(settings.quality, settings.resolution);
   if (key === 'master' || key === 'effects') swingAudio.setVolume(settings.master * settings.effects);
-  if (key === 'attackInput' || key === 'swingDistance') {
+  if (['attackInput', 'swingDistance', 'swipeSpeed'].includes(key)) {
     mouse.reset();
     pendingGesture = undefined;
   }

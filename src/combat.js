@@ -3,7 +3,17 @@ export const CombatTuning = Object.freeze({
   MinFlickDistance: 180, // Relative mouse units in a deliberate swipe.
   FlickWindow: 0.135, // Seconds of recent motion that can contribute to a swipe.
   InputCooldown: 0.10, // Seconds after recovery before another windup.
+  ParryWindow: 0.16,
+  GuardDrain: 8,
+  GuardBreak: 0.58,
   BufferWindow: 0.30, // Fraction at the end of the active swing.
+});
+
+export const Cuts = Object.freeze({
+  UP: Object.freeze({ damage: 1, guardCost: 13, stagger: 0.15, cone: 0.52 }),
+  DOWN: Object.freeze({ damage: 1, guardCost: 23, stagger: 0.08, cone: 0.54 }),
+  LEFT: Object.freeze({ damage: 0.92, guardCost: 17, stagger: 0, cone: 0.24 }),
+  RIGHT: Object.freeze({ damage: 0.92, guardCost: 17, stagger: 0, cone: 0.24 }),
 });
 
 export const AttackPhase = Object.freeze({
@@ -41,14 +51,14 @@ export function isSwinging(combat) {
   return combat.phase !== IDLE && combat.phase !== COOLDOWN;
 }
 
-function inBufferWindow(progress) {
-  return progress + EPSILON >= 1 - CombatTuning.BufferWindow && progress < 1;
+function inBufferWindow(progress, window) {
+  return progress + EPSILON >= 1 - window && progress < 1;
 }
 
 export function comboProgress(combat, weapon, lead = 0) {
   if (combat.phase !== ACTIVE_SWING || combat.buffered) return null;
   const progress = (combat.elapsed + lead) / weapon.swing;
-  return inBufferWindow(progress) ? progress : null;
+  return inBufferWindow(progress, combat.bufferWindow ?? CombatTuning.BufferWindow) ? progress : null;
 }
 
 function canBuffer(combat, weapon, gesture, allowLateCombo) {
@@ -57,7 +67,7 @@ function canBuffer(combat, weapon, gesture, allowLateCombo) {
 
   // A guest's observed window can arrive after the host has entered recovery.
   // A matching swing ID prevents delayed packets from queuing on a later swing.
-  return allowLateCombo && gesture.combo && inBufferWindow(gesture.combo.progress)
+  return allowLateCombo && gesture.combo && inBufferWindow(gesture.combo.progress, CombatTuning.BufferWindow)
     && (combat.phase === RECOVERY || combat.phase === COOLDOWN);
 }
 

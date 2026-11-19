@@ -2,9 +2,9 @@ export const DEFAULT_KEYS = Object.freeze({
   forward: 'KeyW', back: 'KeyS', left: 'KeyA', right: 'KeyD', sprint: 'ShiftLeft', pickup: 'KeyE',
 });
 
-const DEFAULT_SETTINGS = Object.freeze({
+export const DEFAULT_SETTINGS = Object.freeze({
   quality: 'medium', resolution: 1, fps: '0', master: 0.85, effects: 0.9,
-  sensitivity: 1, swingDistance: 1, attackInput: 'swipe', invert: false, frontierView: 'first-person', minimap: true,
+  sensitivity: 1, swingDistance: 1, swipeSpeed: 1, swingResponse: 1, bufferWindow: 0.30, attackInput: 'swipe', invert: false, frontierView: 'first-person', minimap: true,
   terrainOverlay: 'biome', counters: false, uiScale: 1, contrast: false,
   reticleTheme: 'default', reducedMotion: false, captions: false,
   playerName: 'Wanderer', weapon: 'steel-longsword', theme: 'ironwood', keys: DEFAULT_KEYS,
@@ -19,7 +19,7 @@ const CHOICES = {
 
 const RANGES = {
   resolution: [0.5, 1], master: [0, 1], effects: [0, 1],
-  sensitivity: [0.35, 2.5], swingDistance: [1, 2], uiScale: [0.9, 1.3],
+  sensitivity: [0.35, 2.5], swingDistance: [0.75, 2], swipeSpeed: [0.75, 1.75], swingResponse: [0.5, 1.5], bufferWindow: [0.15, 0.45], uiScale: [0.9, 1.3],
 };
 
 export function createSettingsStore() {
