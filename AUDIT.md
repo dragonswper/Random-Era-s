@@ -26,3 +26,38 @@ All 21 tests passed and the Vite dev server started. The install needed a writab
 8. Finish Loadout and Career within the existing campaign style.
 9. Reduce invite friction and test disconnect and version handling.
 10. Measure frame time and exercise old saves and failure cases.
+
+## Rebuild result
+
+The five milestones are in GitHub history. The private browser build uses source commit `7f86ac1`. The 30-test suite covers the combat clock and late inputs, guard and parry, arm joints, asset budgets, reproducible world bytes, transport parsing and saved settings.
+
+- Combat uses distinct cut rules, timed guard and surface feedback. Training and two-window Arena exercised swings, a queued combo, guard, camera changes, and an equipped dagger. The weapon table records the starting balance.
+- Frontier uses the existing terrain and seed stream with a separate stream for landmarks, campfires and the bridge. Map shading, regions and the day/night cycle come from the same simulation snapshot.
+- Loadout, Career, field map, live swipe tester and match recap are accessible through the campaign interface. The 375 px layout, keyboard focus and a plain static nested deployment passed browser checks.
+- The Blender scenes and headless export were exercised end to end. The shipped public folder is about 0.50 MB. The compressed knight is 78,348 bytes and has named arm joints and equipment mounts.
+- An intercepted model failure produced a successful retry. Blocking WebGL 2 produced the full-screen browser-help state.
+
+### Software WebGL frame times
+
+Chromium ran with SwiftShader in a 1180 × 790 CSS viewport at a device scale of 0.77 and a resolution setting of 1. Frontier used the seed `FRAME-4471`, a 60-second sample per row, and short movement bursts. These timings include frame scheduling and runner contention.
+
+| Frontier size | Preset | Frames | Median | 95th percentile |
+| --- | --- | ---: | ---: | ---: |
+| Small | Medium | 222 | 266.7 ms | 516.7 ms |
+| Small | Low | 213 | 283.3 ms | 566.7 ms |
+| Medium | Medium | 212 | 266.6 ms | 599.9 ms |
+| Medium | Low | 262 | 216.7 ms | 416.6 ms |
+| Large | Medium | 230 | 266.6 ms | 483.3 ms |
+| Large | Low | 263 | 216.7 ms | 383.3 ms |
+
+The runner has no GPU render device. Both presets missed the frame-time target here. The result does not establish performance on the target integrated GPU. Small-map Low ran alongside a short browser smoke test and is especially noisy.
+
+### Play-session check
+
+The scripted browser run spent ten minutes sampling Frontier, Training and bot Arena, excluding startup and menu time. It captured zero runtime or console errors. Training Low recorded a 183.4 ms median and 433.3 ms 95th percentile. Bot Arena Low recorded a 133.4 ms median and 333.2 ms 95th percentile. A clean checkout also passed install, all 30 tests, and the production build.
+
+### Open acceptance checks
+
+- The two-window Arena path passed. A direct invite in this runner stopped at ICE address discovery. A match across two physical machines still needs verification. Reconnection covers a transient channel outage, and a closed channel needs a fresh invite.
+- The renderer uses terrain and tree LOD. The Blender scene files do not include separate named LOD1 and LOD2 meshes for each prop. Era dressing uses decorative footprints. The exported collider sidecar is available for engine work.
+- The asset paint is procedural Blender material and vertex work. The interface keeps the campaign tokens alongside some component-specific numeric values.

@@ -11,3 +11,7 @@
 Build and test each milestone before committing. Keep the current daily seed format, era IDs and terrain rules so existing links still resolve. New visual dressing can be derived from the current world without changing collision or height data. Swipe stays the default, and the existing click setting remains available.
 
 The original assets need an owner-approved license before release. The playable knight replacement also needs approval. Keep credits for each placeholder until its replacement ships.
+
+## Release status
+
+The v0.3 build contains all five milestone commits. The test runner has exercised the three mode entry points, asset rebuild, old saves, and the two-browser-window Arena flow. Hardware timing and a direct duel across two machines are the next release checks. The audit records the measured frame times and the remaining authored LOD, collider and reconnect work.
